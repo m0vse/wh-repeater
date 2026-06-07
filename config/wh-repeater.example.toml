@@ -1,0 +1,53 @@
+[repeater]
+status_interval_ms = 500
+minimum_mer_db = 2.0
+minimum_dnumber_db = 0.0
+
+[pluto]
+address = "192.168.2.1"
+port = 8282
+
+[ident]
+enabled = true
+service_name = "WH Repeater"
+interval_seconds = 600
+
+[[receiver]]
+id = 1
+dwell_ms = 1500
+
+[[receiver.target]]
+label = "QO-100 beacon"
+frequency_khz = 10491500
+symbol_rate_ks = 1500
+local_oscillator_khz = 9750000
+antenna = "top"
+system = "dvbs2"
+
+[[receiver.target]]
+label = "Wideband low SR"
+frequency_khz = 10499250
+symbol_rate_ks = 333
+local_oscillator_khz = 9750000
+antenna = "top"
+system = "dvbs2"
+
+[[receiver]]
+id = 2
+dwell_ms = 1500
+
+[[receiver.target]]
+label = "Wideband low SR alternate"
+frequency_khz = 10498750
+symbol_rate_ks = 333
+local_oscillator_khz = 9750000
+antenna = "bottom"
+system = "dvbs2"
+
+[[receiver]]
+id = 3
+dwell_ms = 1500
+
+[[receiver]]
+id = 4
+dwell_ms = 1500
