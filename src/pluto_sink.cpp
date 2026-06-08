@@ -42,6 +42,16 @@ constexpr std::size_t packetsPerDatagram{7};
 constexpr std::size_t datagramSize{tsPacketSize * packetsPerDatagram};
 constexpr auto mqttTimeoutMs{250};
 
+std::string mqttDeviceId(const PlutoConfig& config)
+{
+    return config.mqttDeviceId.empty() ? config.callsign : config.mqttDeviceId;
+}
+
+std::string tsSourceAddress(const PlutoConfig& config)
+{
+    return config.address + ":" + std::to_string(config.port);
+}
+
 void closeSocket(int fd)
 {
     if (fd >= 0 && ::close(fd) != 0) {
@@ -304,20 +314,26 @@ void PlutoSink::configureTransmitter()
         return;
     }
 
-    if (config_.callsign.empty()) {
-        std::cerr << "wh-repeater: Pluto MQTT enabled but callsign is empty\n";
+    const auto deviceId = mqttDeviceId(config_);
+    if (deviceId.empty()) {
+        std::cerr << "wh-repeater: Pluto MQTT enabled but device id is empty\n";
         configured_ = true;
         return;
     }
 
-    publishMqtt(config_, "cmd/pluto/call", config_.callsign);
+    if (config_.mqttProtocol != "tezuka") {
+        publishMqtt(config_, "cmd/pluto/call", config_.callsign);
+    }
     publishControl("tx/gain", std::to_string(config_.txGainDb));
     publishControl("tx/mute", "1");
     publishControl("tx/frequency", std::to_string(config_.txFrequencyHz));
     publishControl("tx/nco", std::to_string(config_.ncoHz));
     publishControl("tx/dvbs2/sr", std::to_string(config_.symbolRateS));
+    publishControl("tx/dvbs2/tssourcemode", "0");
+    publishControl("tx/dvbs2/tssourceaddress", tsSourceAddress(config_));
     if (config_.system == "dvbs") {
         publishControl("tx/stream/mode", "dvbs");
+        publishControl("tx/dvbs2/fec", config_.fec);
     } else {
         publishControl("tx/stream/mode", "dvbs2-ts");
         publishControl("tx/dvbs2/fec", config_.fec);
@@ -325,6 +341,7 @@ void PlutoSink::configureTransmitter()
         publishControl("tx/dvbs2/pilots", config_.pilots ? "1" : "0");
         publishControl("tx/dvbs2/frame", config_.frame);
         publishControl("tx/dvbs2/fecmode", config_.fecMode);
+        publishControl("tx/dvbs2/gainvariable", "-100");
         publishControl("tx/dvbs2/agcgain", "-100");
     }
     configured_ = true;
@@ -332,10 +349,11 @@ void PlutoSink::configureTransmitter()
 
 void PlutoSink::publishControl(std::string_view suffix, std::string_view payload)
 {
-    if (!config_.mqttEnabled || config_.callsign.empty()) {
+    const auto deviceId = mqttDeviceId(config_);
+    if (!config_.mqttEnabled || deviceId.empty()) {
         return;
     }
-    const auto topic = "cmd/pluto/" + config_.callsign + "/" + std::string{suffix};
+    const auto topic = "cmd/pluto/" + deviceId + "/" + std::string{suffix};
     (void)publishMqtt(config_, topic, payload);
 }
 

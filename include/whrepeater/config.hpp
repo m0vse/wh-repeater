@@ -34,6 +34,8 @@ struct PlutoConfig {
     bool mqttEnabled{true};
     std::string mqttHost{"192.168.2.1"};
     std::uint16_t mqttPort{1883};
+    std::string mqttProtocol{"pluto-ori"};
+    std::string mqttDeviceId;
     std::string callsign{"GB3GV"};
     std::string system{"dvbs2"};
     std::uint64_t txFrequencyHz{2400000000ULL};

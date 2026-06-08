@@ -35,6 +35,8 @@ struct PlutoMqttStatus {
     bool connected{false};
     std::string host;
     std::uint16_t port{};
+    std::string protocol;
+    std::string deviceId;
     std::string callsign;
     std::map<std::string, std::string> values;
     std::optional<std::string> error;

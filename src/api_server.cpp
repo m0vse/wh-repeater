@@ -599,6 +599,8 @@ std::string ApiServer::statusJson() const
             << "\"connected\":" << (pluto->connected ? "true" : "false") << ","
             << "\"host\":" << jsonString(pluto->host) << ","
             << "\"port\":" << pluto->port << ","
+            << "\"protocol\":" << jsonString(pluto->protocol) << ","
+            << "\"deviceId\":" << jsonString(pluto->deviceId) << ","
             << "\"callsign\":" << jsonString(pluto->callsign) << ","
             << "\"updatedMsAgo\":" << updatedMsAgo(pluto->updatedAt) << ","
             << "\"error\":" << (pluto->error.has_value() ? jsonString(*pluto->error) : "null") << ","

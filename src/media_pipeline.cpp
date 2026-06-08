@@ -345,6 +345,52 @@ std::string identFilter(std::string_view text)
     return filter.str();
 }
 
+std::string streamInfoText(const ActiveInput& input, std::string_view codec, int width, int height, int frameRate)
+{
+    std::ostringstream text;
+    text << "RX" << input.receiver.value;
+    if (!input.target.label.empty()) {
+        text << " " << input.target.label;
+    }
+    text << "\n" << input.target.frequencyKhz << " kHz / " << input.target.symbolRateKs << " kS"
+         << " | " << codec << " " << width << "x" << height << " " << frameRate << " fps";
+    if (input.status.serviceName.has_value() && !input.status.serviceName->empty()) {
+        text << "\n" << *input.status.serviceName;
+        if (input.status.modulation.has_value() && !input.status.modulation->empty()) {
+            text << " | " << *input.status.modulation;
+        }
+    } else if (input.status.modulation.has_value() && !input.status.modulation->empty()) {
+        text << "\n" << *input.status.modulation;
+    }
+    return text.str();
+}
+
+std::string streamInfoFilter(std::string_view text, int frameRate)
+{
+    const auto lines = splitLines(text);
+    std::ostringstream filter;
+    for (std::size_t index = 0; index < lines.size(); ++index) {
+        if (index != 0) {
+            filter << ",";
+        }
+        filter << "drawtext=fontfile='" << slateFont << "':text='" << escapeDrawText(lines[index])
+               << "':x=w-text_w-46:y=" << (44 + static_cast<int>(index) * 40)
+               << ":fontsize=24:fontcolor=white"
+               << ":box=1:boxcolor=black@0.62:boxborderw=10"
+               << ":enable='lt(n," << std::max(1, frameRate) * 10 << ")'";
+    }
+    return filter.str();
+}
+
+std::string liveOverlayFilter(const RepeaterConfig& config, const std::optional<std::string>& streamInfo, int frameRate)
+{
+    auto filter = identFilter(identText(config));
+    if (streamInfo.has_value() && !streamInfo->empty()) {
+        filter += "," + streamInfoFilter(*streamInfo, frameRate);
+    }
+    return filter;
+}
+
 FramePtr renderIdentFrame(const RepeaterConfig& config, int frameRate)
 {
     return renderFilteredFrame(identFilter(identText(config)), frameRate, fillBlack);
@@ -364,14 +410,14 @@ FramePtr renderTestcardFrame(const RepeaterConfig& config, int frameRate)
     return renderFilteredFrame(testcardFilter(identText(config)), frameRate, fillTestcard);
 }
 
-class IdentOverlayRenderer {
+class OverlayRenderer {
 public:
-    IdentOverlayRenderer(std::string text, int width, int height, AVPixelFormat pixelFormat, int frameRate)
+    OverlayRenderer(std::string filter, int width, int height, AVPixelFormat pixelFormat, int frameRate)
         : pixelFormat_{pixelFormat}
     {
         graph_.reset(avfilter_graph_alloc());
         if (!graph_) {
-            throw std::runtime_error{"allocate ident overlay filter graph failed"};
+            throw std::runtime_error{"allocate overlay filter graph failed"};
         }
 
         const auto sourceArgs = "video_size=" + std::to_string(width) + "x" + std::to_string(height)
@@ -416,21 +462,21 @@ public:
 
         AVFilterInOut* inputPtr = inputs.release();
         AVFilterInOut* outputPtr = outputs.release();
-        const auto parseStatus = avfilter_graph_parse_ptr(graph_.get(), identFilter(text).c_str(), &inputPtr, &outputPtr, nullptr);
+        const auto parseStatus = avfilter_graph_parse_ptr(graph_.get(), filter.c_str(), &inputPtr, &outputPtr, nullptr);
         avfilter_inout_free(&inputPtr);
         avfilter_inout_free(&outputPtr);
-        checkAv(parseStatus, "parse ident overlay filter");
-        checkAv(avfilter_graph_config(graph_.get(), nullptr), "configure ident overlay filter");
+        checkAv(parseStatus, "parse overlay filter");
+        checkAv(avfilter_graph_config(graph_.get(), nullptr), "configure overlay filter");
     }
 
     FramePtr render(AVFrame* frame)
     {
-        checkAv(av_buffersrc_add_frame_flags(source_, frame, AV_BUFFERSRC_FLAG_KEEP_REF), "send frame to ident overlay");
+        checkAv(av_buffersrc_add_frame_flags(source_, frame, AV_BUFFERSRC_FLAG_KEEP_REF), "send frame to overlay");
         FramePtr output{av_frame_alloc()};
         if (!output) {
-            throw std::runtime_error{"allocate ident overlay frame failed"};
+            throw std::runtime_error{"allocate overlay frame failed"};
         }
-        checkAv(av_buffersink_get_frame(sink_, output.get()), "receive ident overlay frame");
+        checkAv(av_buffersink_get_frame(sink_, output.get()), "receive overlay frame");
         return output;
     }
 
@@ -890,14 +936,269 @@ int evenDimension(int value)
     return std::max(16, value & ~1);
 }
 
+class PersistentRtmpMuxer {
+public:
+    explicit PersistentRtmpMuxer(const RepeaterConfig& config)
+        : config_{config}
+    {
+    }
+
+    ~PersistentRtmpMuxer()
+    {
+        close();
+    }
+
+    PersistentRtmpMuxer(const PersistentRtmpMuxer&) = delete;
+    PersistentRtmpMuxer& operator=(const PersistentRtmpMuxer&) = delete;
+
+    void configureVideo(const AVCodecContext& codec)
+    {
+        std::lock_guard lock{mutex_};
+        if (!enabled() || videoConfigured_) {
+            return;
+        }
+        videoCodecParameters_.reset(avcodec_parameters_alloc());
+        if (!videoCodecParameters_) {
+            std::cerr << "wh-repeater: allocate RTMP video parameters failed\n";
+            return;
+        }
+        if (avcodec_parameters_from_context(videoCodecParameters_.get(), &codec) < 0) {
+            std::cerr << "wh-repeater: copy RTMP video parameters failed\n";
+            videoCodecParameters_.reset();
+            return;
+        }
+        videoTimeBase_ = codec.time_base;
+        videoConfigured_ = true;
+        openLocked();
+    }
+
+    void configureAudio(const AVCodecContext& codec)
+    {
+        std::lock_guard lock{mutex_};
+        if (!enabled() || audioConfigured_) {
+            return;
+        }
+        audioCodecParameters_.reset(avcodec_parameters_alloc());
+        if (!audioCodecParameters_) {
+            std::cerr << "wh-repeater: allocate RTMP audio parameters failed\n";
+            return;
+        }
+        if (avcodec_parameters_from_context(audioCodecParameters_.get(), &codec) < 0) {
+            std::cerr << "wh-repeater: copy RTMP audio parameters failed\n";
+            audioCodecParameters_.reset();
+            return;
+        }
+        audioTimeBase_ = codec.time_base;
+        audioConfigured_ = true;
+        std::cout << "media pipeline configured RTMP AAC audio at " << codec.sample_rate << " Hz\n";
+        openLocked();
+    }
+
+    void writeVideoPacket(const AVPacket* packet)
+    {
+        writePacket(packet, videoTimeBase_, videoTimestampOffset_, lastVideoDts_, true);
+    }
+
+    void writeAudioPacket(const AVPacket* packet)
+    {
+        writePacket(packet, audioTimeBase_, audioTimestampOffset_, lastAudioDts_, false);
+    }
+
+private:
+    struct AvCodecParametersDeleter {
+        void operator()(AVCodecParameters* parameters) const
+        {
+            avcodec_parameters_free(&parameters);
+        }
+    };
+
+    using CodecParametersPtr = std::unique_ptr<AVCodecParameters, AvCodecParametersDeleter>;
+
+    bool enabled() const
+    {
+        return config_.streaming.rtmp.enabled && !config_.streaming.rtmp.url.empty();
+    }
+
+    void openLocked()
+    {
+        if (!enabled() || !videoConfigured_ || headerWritten_) {
+            return;
+        }
+        if (std::chrono::steady_clock::now() < nextConnectAttempt_) {
+            return;
+        }
+
+        AVFormatContext* rawFormat{};
+        const auto allocStatus = avformat_alloc_output_context2(&rawFormat, nullptr, "flv", config_.streaming.rtmp.url.c_str());
+        if (allocStatus < 0 || rawFormat == nullptr) {
+            markConnectFailed("allocate RTMP output failed", allocStatus);
+            return;
+        }
+        rtmpFormat_ = rawFormat;
+
+        videoStream_ = avformat_new_stream(rtmpFormat_, nullptr);
+        if (videoStream_ == nullptr || avcodec_parameters_copy(videoStream_->codecpar, videoCodecParameters_.get()) < 0) {
+            std::cerr << "wh-repeater: create RTMP video stream failed\n";
+            closeLocked(false);
+            scheduleReconnect();
+            return;
+        }
+        videoStream_->time_base = videoTimeBase_;
+
+        if (audioConfigured_) {
+            audioStream_ = avformat_new_stream(rtmpFormat_, nullptr);
+            if (audioStream_ == nullptr || avcodec_parameters_copy(audioStream_->codecpar, audioCodecParameters_.get()) < 0) {
+                std::cerr << "wh-repeater: create RTMP audio stream failed\n";
+                audioStream_ = nullptr;
+            } else {
+                audioStream_->time_base = audioTimeBase_;
+            }
+        }
+
+        if ((rtmpFormat_->oformat->flags & AVFMT_NOFILE) == 0) {
+            const auto openStatus = avio_open2(&rtmpFormat_->pb, config_.streaming.rtmp.url.c_str(), AVIO_FLAG_WRITE, nullptr, nullptr);
+            if (openStatus < 0) {
+                markConnectFailed("RTMP connect failed", openStatus);
+                closeLocked(false);
+                return;
+            }
+        }
+
+        AVDictionary* options = nullptr;
+        av_dict_set(&options, "flvflags", "no_duration_filesize", 0);
+        const auto headerStatus = avformat_write_header(rtmpFormat_, &options);
+        av_dict_free(&options);
+        if (headerStatus < 0) {
+            markConnectFailed("write RTMP header failed", headerStatus);
+            closeLocked(false);
+            return;
+        }
+
+        headerWritten_ = true;
+        std::cout << "media pipeline streaming RTMP to " << config_.streaming.rtmp.url << '\n';
+    }
+
+    void writePacket(const AVPacket* packet,
+                     AVRational sourceTimeBase,
+                     std::int64_t& timestampOffset,
+                     std::int64_t& lastDts,
+                     bool video)
+    {
+        std::lock_guard lock{mutex_};
+        if (!enabled()) {
+            return;
+        }
+        if (!headerWritten_) {
+            openLocked();
+        }
+        auto* stream = video ? videoStream_ : audioStream_;
+        if (!headerWritten_ || rtmpFormat_ == nullptr || stream == nullptr) {
+            return;
+        }
+
+        PacketPtr copy{av_packet_clone(packet)};
+        if (!copy) {
+            std::cerr << "wh-repeater: clone RTMP packet failed\n";
+            return;
+        }
+        av_packet_rescale_ts(copy.get(), sourceTimeBase, stream->time_base);
+        const auto timestamp = copy->dts != AV_NOPTS_VALUE ? copy->dts : copy->pts;
+        if (timestamp != AV_NOPTS_VALUE && lastDts != AV_NOPTS_VALUE && timestamp + timestampOffset <= lastDts) {
+            const auto duration = copy->duration > 0 ? copy->duration : 1;
+            timestampOffset = lastDts + duration - timestamp;
+        }
+        if (timestampOffset != 0) {
+            if (copy->pts != AV_NOPTS_VALUE) {
+                copy->pts += timestampOffset;
+            }
+            if (copy->dts != AV_NOPTS_VALUE) {
+                copy->dts += timestampOffset;
+            }
+        }
+        if (copy->dts != AV_NOPTS_VALUE) {
+            lastDts = copy->dts;
+        } else if (copy->pts != AV_NOPTS_VALUE) {
+            lastDts = copy->pts;
+        }
+        copy->stream_index = stream->index;
+        const auto status = av_interleaved_write_frame(rtmpFormat_, copy.get());
+        if (status < 0) {
+            std::cerr << "wh-repeater: RTMP " << (video ? "video" : "audio")
+                      << " write failed: " << avError(status) << '\n';
+            closeLocked(false);
+            scheduleReconnect();
+        }
+    }
+
+    void markConnectFailed(std::string_view operation, int status)
+    {
+        std::cerr << "wh-repeater: " << operation << ": " << avError(status) << '\n';
+        scheduleReconnect();
+    }
+
+    void scheduleReconnect()
+    {
+        nextConnectAttempt_ = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    }
+
+    void close()
+    {
+        std::lock_guard lock{mutex_};
+        closeLocked(true);
+    }
+
+    void closeLocked(bool writeTrailer)
+    {
+        if (headerWritten_ && writeTrailer && rtmpFormat_ != nullptr) {
+            av_write_trailer(rtmpFormat_);
+        }
+        headerWritten_ = false;
+        videoStream_ = nullptr;
+        audioStream_ = nullptr;
+        if (rtmpFormat_ != nullptr) {
+            if ((rtmpFormat_->oformat->flags & AVFMT_NOFILE) == 0 && rtmpFormat_->pb != nullptr) {
+                avio_closep(&rtmpFormat_->pb);
+            }
+            avformat_free_context(rtmpFormat_);
+            rtmpFormat_ = nullptr;
+        }
+    }
+
+    const RepeaterConfig& config_;
+    std::mutex mutex_;
+    CodecParametersPtr videoCodecParameters_;
+    CodecParametersPtr audioCodecParameters_;
+    AVRational videoTimeBase_{};
+    AVRational audioTimeBase_{};
+    AVFormatContext* rtmpFormat_{nullptr};
+    AVStream* videoStream_{nullptr};
+    AVStream* audioStream_{nullptr};
+    std::chrono::steady_clock::time_point nextConnectAttempt_{};
+    std::int64_t videoTimestampOffset_{0};
+    std::int64_t audioTimestampOffset_{0};
+    std::int64_t lastVideoDts_{AV_NOPTS_VALUE};
+    std::int64_t lastAudioDts_{AV_NOPTS_VALUE};
+    bool videoConfigured_{false};
+    bool audioConfigured_{false};
+    bool headerWritten_{false};
+};
+
 class H264OutputMuxer {
 public:
-    H264OutputMuxer(const RepeaterConfig& config, PlutoSink& output, int width, int height, int frameRate)
+    H264OutputMuxer(const RepeaterConfig& config,
+                    PlutoSink& output,
+                    PersistentRtmpMuxer* rtmp,
+                    int width,
+                    int height,
+                    int frameRate,
+                    std::optional<std::string> streamInfo)
         : config_{config}
         , output_{output}
+        , rtmp_{rtmp}
         , width_{width}
         , height_{height}
         , frameRate_{frameRate}
+        , streamInfo_{std::move(streamInfo)}
     {
         initialise();
     }
@@ -909,17 +1210,8 @@ public:
         } catch (const std::exception& ex) {
             std::cerr << "wh-repeater: live transcode flush failed: " << ex.what() << '\n';
         }
-        if (rtmpHeaderWritten_) {
-            av_write_trailer(rtmpFormat_);
-        }
         if (headerWritten_) {
             av_write_trailer(format_);
-        }
-        if (rtmpFormat_) {
-            if ((rtmpFormat_->oformat->flags & AVFMT_NOFILE) == 0 && rtmpFormat_->pb != nullptr) {
-                avio_closep(&rtmpFormat_->pb);
-            }
-            avformat_free_context(rtmpFormat_);
         }
         if (codec_) {
             avcodec_free_context(&codec_);
@@ -958,7 +1250,7 @@ public:
 
     void encode(AVFrame* frame)
     {
-        auto overlayFrame = identOverlay_->render(frame);
+        auto overlayFrame = overlay_->render(frame);
         checkAv(avcodec_send_frame(codec_, overlayFrame.get()), "send transcode frame");
         drainPackets();
     }
@@ -999,7 +1291,11 @@ private:
         const auto videoBitrateKbps = std::max(250, static_cast<int>(config_.pluto.videoBitrateKbps));
         auto encoder = openH264Encoder(*format_, width_, height_, frameRate, videoBitrateKbps);
         codec_ = encoder.context;
-        identOverlay_ = std::make_unique<IdentOverlayRenderer>(identText(config_), codec_->width, codec_->height, codec_->pix_fmt, frameRate);
+        overlay_ = std::make_unique<OverlayRenderer>(liveOverlayFilter(config_, streamInfo_, frameRate),
+                                                     codec_->width,
+                                                     codec_->height,
+                                                     codec_->pix_fmt,
+                                                     frameRate);
         std::cout << "media pipeline transcoding received video to H.264 with encoder "
                   << encoder.name << " at " << width_ << "x" << height_ << '\n';
         checkAv(avcodec_parameters_from_context(stream_->codecpar, codec_), "copy live encoder parameters");
@@ -1015,7 +1311,9 @@ private:
         av_dict_free(&options);
         checkAv(headerStatus, "write live MPEG-TS header");
         headerWritten_ = true;
-        initialiseRtmp();
+        if (rtmp_ != nullptr) {
+            rtmp_->configureVideo(*codec_);
+        }
     }
 
     void drainPackets()
@@ -1033,77 +1331,11 @@ private:
             if (packet->pts != AV_NOPTS_VALUE) {
                 packet->dts = packet->pts;
             }
-            writeRtmpPacket(packet.get());
+            if (rtmp_ != nullptr) {
+                rtmp_->writeVideoPacket(packet.get());
+            }
             writeTransportPacket(packet.get());
             av_packet_unref(packet.get());
-        }
-    }
-
-    void initialiseRtmp()
-    {
-        if (!config_.streaming.rtmp.enabled || config_.streaming.rtmp.url.empty()) {
-            return;
-        }
-
-        AVFormatContext* rawFormat{};
-        const auto allocStatus = avformat_alloc_output_context2(&rawFormat, nullptr, "flv", config_.streaming.rtmp.url.c_str());
-        if (allocStatus < 0 || rawFormat == nullptr) {
-            std::cerr << "wh-repeater: allocate RTMP output failed: " << avError(allocStatus) << '\n';
-            return;
-        }
-        rtmpFormat_ = rawFormat;
-        rtmpStream_ = avformat_new_stream(rtmpFormat_, nullptr);
-        if (rtmpStream_ == nullptr || avcodec_parameters_from_context(rtmpStream_->codecpar, codec_) < 0) {
-            std::cerr << "wh-repeater: create RTMP stream for live transcode failed\n";
-            avformat_free_context(rtmpFormat_);
-            rtmpFormat_ = nullptr;
-            rtmpStream_ = nullptr;
-            return;
-        }
-        rtmpStream_->time_base = codec_->time_base;
-
-        if ((rtmpFormat_->oformat->flags & AVFMT_NOFILE) == 0) {
-            const auto openStatus = avio_open2(&rtmpFormat_->pb, config_.streaming.rtmp.url.c_str(), AVIO_FLAG_WRITE, nullptr, nullptr);
-            if (openStatus < 0) {
-                std::cerr << "wh-repeater: RTMP connect failed: " << avError(openStatus) << '\n';
-                avformat_free_context(rtmpFormat_);
-                rtmpFormat_ = nullptr;
-                rtmpStream_ = nullptr;
-                return;
-            }
-        }
-
-        AVDictionary* options = nullptr;
-        av_dict_set(&options, "flvflags", "no_duration_filesize", 0);
-        const auto headerStatus = avformat_write_header(rtmpFormat_, &options);
-        av_dict_free(&options);
-        if (headerStatus < 0) {
-            std::cerr << "wh-repeater: write RTMP header failed: " << avError(headerStatus) << '\n';
-            if ((rtmpFormat_->oformat->flags & AVFMT_NOFILE) == 0 && rtmpFormat_->pb != nullptr) {
-                avio_closep(&rtmpFormat_->pb);
-            }
-            avformat_free_context(rtmpFormat_);
-            rtmpFormat_ = nullptr;
-            rtmpStream_ = nullptr;
-            return;
-        }
-        rtmpHeaderWritten_ = true;
-    }
-
-    void writeRtmpPacket(const AVPacket* packet)
-    {
-        if (!rtmpHeaderWritten_ || rtmpFormat_ == nullptr || rtmpStream_ == nullptr) {
-            return;
-        }
-        PacketPtr copy{av_packet_clone(packet)};
-        if (!copy) {
-            return;
-        }
-        av_packet_rescale_ts(copy.get(), codec_->time_base, rtmpStream_->time_base);
-        copy->duration = av_rescale_q(1, codec_->time_base, rtmpStream_->time_base);
-        copy->stream_index = rtmpStream_->index;
-        if (av_interleaved_write_frame(rtmpFormat_, copy.get()) < 0) {
-            rtmpHeaderWritten_ = false;
         }
     }
 
@@ -1117,26 +1349,27 @@ private:
 
     const RepeaterConfig& config_;
     PlutoSink& output_;
+    PersistentRtmpMuxer* rtmp_{};
     int width_{};
     int height_{};
     int frameRate_{};
+    std::optional<std::string> streamInfo_;
     AVFormatContext* format_{nullptr};
     AVCodecContext* codec_{nullptr};
     AVStream* stream_{nullptr};
-    AVFormatContext* rtmpFormat_{nullptr};
-    AVStream* rtmpStream_{nullptr};
-    std::unique_ptr<IdentOverlayRenderer> identOverlay_;
+    std::unique_ptr<OverlayRenderer> overlay_;
     std::uint8_t* avioBuffer_{nullptr};
     bool headerWritten_{false};
-    bool rtmpHeaderWritten_{false};
     bool flushed_{false};
 };
 
 class LiveTranscoder {
 public:
-    LiveTranscoder(RepeaterConfig config, PlutoSink& output)
+    LiveTranscoder(RepeaterConfig config, PlutoSink& output, PersistentRtmpMuxer* rtmp, std::optional<ActiveInput> active)
         : config_{std::move(config)}
         , output_{output}
+        , rtmp_{rtmp}
+        , active_{std::move(active)}
         , thread_{[this] {
             run();
         }}
@@ -1218,7 +1451,10 @@ private:
                   << " video, decoding with " << (decoder->name == nullptr ? "default" : decoder->name)
                   << " at " << decodedWidth << "x" << decodedHeight << " " << frameRate << " fps\n";
 
-        H264OutputMuxer outputMuxer{config_, output_, decodedWidth, decodedHeight, frameRate};
+        auto streamInfo = active_.has_value()
+            ? std::optional<std::string>{streamInfoText(*active_, codecDescription(codecId), decodedWidth, decodedHeight, frameRate)}
+            : std::nullopt;
+        H264OutputMuxer outputMuxer{config_, output_, rtmp_, fallbackWidth, fallbackHeight, fallbackFrameRate(config_), std::move(streamInfo)};
         auto frame = FramePtr{av_frame_alloc()};
         auto convertedFrame = FramePtr{av_frame_alloc()};
         auto packet = PacketPtr{av_packet_alloc()};
@@ -1328,15 +1564,18 @@ private:
 
     RepeaterConfig config_;
     PlutoSink& output_;
+    PersistentRtmpMuxer* rtmp_{};
+    std::optional<ActiveInput> active_;
     BlockingTsInput input_;
     std::thread thread_;
 };
 
 class FallbackMuxer {
 public:
-    FallbackMuxer(const RepeaterConfig& config, PlutoSink& output)
+    FallbackMuxer(const RepeaterConfig& config, PlutoSink& output, PersistentRtmpMuxer* rtmp)
         : config_{config}
         , output_{output}
+        , rtmp_{rtmp}
         , frameRate_{fallbackFrameRate(config_)}
         , slideDurationFrames_{std::max<std::int64_t>(1, config_.fallback.slideDuration.count() * frameRate_ / 1000)}
         , morseUnits_{morseToneUnits(identText(config_))}
@@ -1356,17 +1595,8 @@ public:
         } catch (const std::exception& ex) {
             std::cerr << "wh-repeater: fallback audio flush failed: " << ex.what() << '\n';
         }
-        if (rtmpHeaderWritten_) {
-            av_write_trailer(rtmpFormat_);
-        }
         if (headerWritten_) {
             av_write_trailer(format_);
-        }
-        if (rtmpFormat_) {
-            if ((rtmpFormat_->oformat->flags & AVFMT_NOFILE) == 0 && rtmpFormat_->pb != nullptr) {
-                avio_closep(&rtmpFormat_->pb);
-            }
-            avformat_free_context(rtmpFormat_);
         }
         if (codec_) {
             avcodec_free_context(&codec_);
@@ -1495,7 +1725,7 @@ private:
         const auto videoBitrateKbps = fallbackVideoBitrateKbps(config_);
         auto encoder = openFallbackEncoder(*format_, frameRate_, videoBitrateKbps);
         codec_ = encoder.context;
-        identOverlay_ = std::make_unique<IdentOverlayRenderer>(identText(config_), codec_->width, codec_->height, codec_->pix_fmt, frameRate_);
+        identOverlay_ = std::make_unique<OverlayRenderer>(identFilter(identText(config_)), codec_->width, codec_->height, codec_->pix_fmt, frameRate_);
         std::cout << "media pipeline using H.264 encoder " << encoder.name
                   << " at " << frameRate_ << " fps\n";
         checkAv(avcodec_parameters_from_context(stream_->codecpar, codec_), "copy fallback encoder parameters");
@@ -1514,7 +1744,12 @@ private:
         checkAv(headerStatus, "write fallback MPEG-TS header");
         headerWritten_ = true;
 
-        initialiseRtmp();
+        if (rtmp_ != nullptr) {
+            if (audioCodec_ != nullptr) {
+                rtmp_->configureAudio(*audioCodec_);
+            }
+            rtmp_->configureVideo(*codec_);
+        }
     }
 
     void initialiseAudio()
@@ -1566,7 +1801,9 @@ private:
             if (packet->pts != AV_NOPTS_VALUE) {
                 packet->dts = packet->pts;
             }
-            writeRtmpPacket(packet.get());
+            if (rtmp_ != nullptr) {
+                rtmp_->writeVideoPacket(packet.get());
+            }
             writeTransportPacket(packet.get());
             av_packet_unref(packet.get());
         }
@@ -1589,6 +1826,7 @@ private:
             identEndFrame_ = identStartFrame_ + morseFrames;
             nextIdentFrame_ = frameIndex + static_cast<std::int64_t>(config_.ident.interval.count()) * frameRate_;
             firstIdent_ = false;
+            std::cout << "media pipeline starting Morse ident audio for " << identText(config_) << '\n';
         }
 
         return frameIndex >= identStartFrame_ && frameIndex < identEndFrame_;
@@ -1669,124 +1907,11 @@ private:
                 break;
             }
             checkAv(status, "receive fallback audio packet");
-            writeRtmpAudioPacket(packet.get());
+            if (rtmp_ != nullptr) {
+                rtmp_->writeAudioPacket(packet.get());
+            }
             writeTransportAudioPacket(packet.get());
             av_packet_unref(packet.get());
-        }
-    }
-
-    void initialiseRtmp()
-    {
-        if (!config_.streaming.rtmp.enabled) {
-            return;
-        }
-        if (config_.streaming.rtmp.url.empty()) {
-            std::cerr << "wh-repeater: RTMP streaming enabled but URL is empty\n";
-            return;
-        }
-
-        AVFormatContext* rawFormat{};
-        const auto allocStatus = avformat_alloc_output_context2(&rawFormat, nullptr, "flv", config_.streaming.rtmp.url.c_str());
-        if (allocStatus < 0 || rawFormat == nullptr) {
-            std::cerr << "wh-repeater: allocate RTMP output failed: " << avError(allocStatus) << '\n';
-            return;
-        }
-        rtmpFormat_ = rawFormat;
-
-        rtmpStream_ = avformat_new_stream(rtmpFormat_, nullptr);
-        if (rtmpStream_ == nullptr) {
-            std::cerr << "wh-repeater: create RTMP video stream failed\n";
-            avformat_free_context(rtmpFormat_);
-            rtmpFormat_ = nullptr;
-            return;
-        }
-        if (avcodec_parameters_from_context(rtmpStream_->codecpar, codec_) < 0) {
-            std::cerr << "wh-repeater: copy RTMP encoder parameters failed\n";
-            avformat_free_context(rtmpFormat_);
-            rtmpFormat_ = nullptr;
-            rtmpStream_ = nullptr;
-            return;
-        }
-        rtmpStream_->time_base = codec_->time_base;
-
-        if (audioCodec_ != nullptr && audioStream_ != nullptr) {
-            rtmpAudioStream_ = avformat_new_stream(rtmpFormat_, nullptr);
-            if (rtmpAudioStream_ == nullptr || avcodec_parameters_from_context(rtmpAudioStream_->codecpar, audioCodec_) < 0) {
-                std::cerr << "wh-repeater: create RTMP audio stream failed\n";
-                rtmpAudioStream_ = nullptr;
-            } else {
-                rtmpAudioStream_->time_base = audioCodec_->time_base;
-            }
-        }
-
-        if ((rtmpFormat_->oformat->flags & AVFMT_NOFILE) == 0) {
-            const auto openStatus = avio_open2(&rtmpFormat_->pb, config_.streaming.rtmp.url.c_str(), AVIO_FLAG_WRITE, nullptr, nullptr);
-            if (openStatus < 0) {
-                std::cerr << "wh-repeater: RTMP connect failed: " << avError(openStatus) << '\n';
-                avformat_free_context(rtmpFormat_);
-                rtmpFormat_ = nullptr;
-                rtmpStream_ = nullptr;
-                return;
-            }
-        }
-
-        AVDictionary* options = nullptr;
-        av_dict_set(&options, "flvflags", "no_duration_filesize", 0);
-        const auto headerStatus = avformat_write_header(rtmpFormat_, &options);
-        av_dict_free(&options);
-        if (headerStatus < 0) {
-            std::cerr << "wh-repeater: write RTMP header failed: " << avError(headerStatus) << '\n';
-            if ((rtmpFormat_->oformat->flags & AVFMT_NOFILE) == 0 && rtmpFormat_->pb != nullptr) {
-                avio_closep(&rtmpFormat_->pb);
-            }
-            avformat_free_context(rtmpFormat_);
-            rtmpFormat_ = nullptr;
-            rtmpStream_ = nullptr;
-            return;
-        }
-
-        rtmpHeaderWritten_ = true;
-        std::cout << "media pipeline streaming RTMP to " << config_.streaming.rtmp.url << '\n';
-    }
-
-    void writeRtmpPacket(const AVPacket* packet)
-    {
-        if (!rtmpHeaderWritten_ || rtmpFormat_ == nullptr || rtmpStream_ == nullptr) {
-            return;
-        }
-
-        PacketPtr copy{av_packet_clone(packet)};
-        if (!copy) {
-            std::cerr << "wh-repeater: clone RTMP packet failed\n";
-            return;
-        }
-        av_packet_rescale_ts(copy.get(), codec_->time_base, rtmpStream_->time_base);
-        copy->duration = av_rescale_q(1, codec_->time_base, rtmpStream_->time_base);
-        copy->stream_index = rtmpStream_->index;
-        const auto status = av_interleaved_write_frame(rtmpFormat_, copy.get());
-        if (status < 0) {
-            std::cerr << "wh-repeater: RTMP write failed: " << avError(status) << '\n';
-            rtmpHeaderWritten_ = false;
-        }
-    }
-
-    void writeRtmpAudioPacket(const AVPacket* packet)
-    {
-        if (!rtmpHeaderWritten_ || rtmpFormat_ == nullptr || rtmpAudioStream_ == nullptr || audioCodec_ == nullptr) {
-            return;
-        }
-
-        PacketPtr copy{av_packet_clone(packet)};
-        if (!copy) {
-            std::cerr << "wh-repeater: clone RTMP audio packet failed\n";
-            return;
-        }
-        av_packet_rescale_ts(copy.get(), audioCodec_->time_base, rtmpAudioStream_->time_base);
-        copy->stream_index = rtmpAudioStream_->index;
-        const auto status = av_interleaved_write_frame(rtmpFormat_, copy.get());
-        if (status < 0) {
-            std::cerr << "wh-repeater: RTMP audio write failed: " << avError(status) << '\n';
-            rtmpHeaderWritten_ = false;
         }
     }
 
@@ -1807,19 +1932,16 @@ private:
 
     const RepeaterConfig& config_;
     PlutoSink& output_;
+    PersistentRtmpMuxer* rtmp_{};
     int frameRate_{};
     AVFormatContext* format_{nullptr};
     AVCodecContext* codec_{nullptr};
     AVCodecContext* audioCodec_{nullptr};
     AVStream* stream_{nullptr};
     AVStream* audioStream_{nullptr};
-    AVFormatContext* rtmpFormat_{nullptr};
-    AVStream* rtmpStream_{nullptr};
-    AVStream* rtmpAudioStream_{nullptr};
-    std::unique_ptr<IdentOverlayRenderer> identOverlay_;
+    std::unique_ptr<OverlayRenderer> identOverlay_;
     std::uint8_t* avioBuffer_{nullptr};
     bool headerWritten_{false};
-    bool rtmpHeaderWritten_{false};
     std::optional<std::string> notice_;
     FramePtr cachedSlate_;
     FramePtr cachedIdent_;
@@ -1992,12 +2114,18 @@ void MediaPipeline::enterIdle()
 void MediaPipeline::workerLoop()
 {
     std::int64_t fallbackFrameIndex = 0;
+    std::unique_ptr<PersistentRtmpMuxer> rtmpMuxer;
     std::unique_ptr<FallbackMuxer> fallbackMuxer;
     std::unique_ptr<LiveTranscoder> liveTranscoder;
     auto nextFrameAt = std::chrono::steady_clock::now();
 
+    if (config_.streaming.rtmp.enabled && !config_.streaming.rtmp.url.empty()) {
+        rtmpMuxer = std::make_unique<PersistentRtmpMuxer>(config_);
+    }
+
     while (true) {
         MediaPipelineMode mode;
+        std::optional<ActiveInput> active;
         std::optional<std::string> notice;
         bool beaconAllowed{};
         {
@@ -2009,6 +2137,7 @@ void MediaPipeline::workerLoop()
                 break;
             }
             mode = mode_;
+            active = active_;
             notice = accessNotice_;
             beaconAllowed = beaconAllowed_;
         }
@@ -2017,7 +2146,7 @@ void MediaPipeline::workerLoop()
             if (mode == MediaPipelineMode::fallback) {
                 liveTranscoder.reset();
                 if (!fallbackMuxer) {
-                    fallbackMuxer = std::make_unique<FallbackMuxer>(config_, output_);
+                    fallbackMuxer = std::make_unique<FallbackMuxer>(config_, output_, rtmpMuxer.get());
                     fallbackFrameIndex = 0;
                     nextFrameAt = std::chrono::steady_clock::now();
                 }
@@ -2037,7 +2166,7 @@ void MediaPipeline::workerLoop()
             fallbackMuxer.reset();
             if (mode == MediaPipelineMode::retransmit) {
                 if (!liveTranscoder) {
-                    liveTranscoder = std::make_unique<LiveTranscoder>(config_, output_);
+                    liveTranscoder = std::make_unique<LiveTranscoder>(config_, output_, rtmpMuxer.get(), active);
                 }
                 std::vector<std::byte> queued;
                 std::unique_lock lock{mutex_};
@@ -2067,6 +2196,7 @@ void MediaPipeline::workerLoop()
     }
     fallbackMuxer.reset();
     liveTranscoder.reset();
+    rtmpMuxer.reset();
 }
 
 void MediaPipeline::stopWorker()

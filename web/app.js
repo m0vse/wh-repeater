@@ -40,6 +40,8 @@ const el = {
   plutoMqttEnabled: document.querySelector("#pluto-mqtt-enabled"),
   plutoMqttHost: document.querySelector("#pluto-mqtt-host"),
   plutoMqttPort: document.querySelector("#pluto-mqtt-port"),
+  plutoMqttProtocol: document.querySelector("#pluto-mqtt-protocol"),
+  plutoMqttDeviceId: document.querySelector("#pluto-mqtt-device-id"),
   plutoCallsign: document.querySelector("#pluto-callsign"),
   plutoSystem: document.querySelector("#pluto-system"),
   plutoTxFrequency: document.querySelector("#pluto-tx-frequency"),
@@ -315,6 +317,8 @@ function renderTxStatus() {
   const list = document.createElement("dl");
   list.className = "tx-status-grid";
   appendStatusRow(list, "MQTT", pluto?.enabled === false ? "disabled" : `${pluto?.host || "-"}:${pluto?.port || "-"}`);
+  appendStatusRow(list, "Protocol", pluto?.protocol || "-");
+  appendStatusRow(list, "Device ID", pluto?.deviceId || "-");
   appendStatusRow(list, "Callsign", pluto?.callsign);
   appendStatusRow(list, "Frequency", txValue(values, "tx/frequency"));
   appendStatusRow(list, "Gain", txValue(values, "tx/gain"));
@@ -347,6 +351,8 @@ function fillConfigForm() {
   el.plutoMqttEnabled.checked = config.pluto?.mqttEnabled ?? true;
   el.plutoMqttHost.value = config.pluto?.mqttHost ?? "192.168.2.1";
   el.plutoMqttPort.value = config.pluto?.mqttPort ?? 1883;
+  el.plutoMqttProtocol.value = config.pluto?.mqttProtocol ?? "pluto-ori";
+  el.plutoMqttDeviceId.value = config.pluto?.mqttDeviceId ?? "";
   el.plutoCallsign.value = config.pluto?.callsign ?? "GB3GV";
   el.plutoSystem.value = config.pluto?.system ?? "dvbs2";
   el.plutoTxFrequency.value = config.pluto?.txFrequencyHz ?? 2400000000;
@@ -494,6 +500,8 @@ function readConfigForm() {
       mqttEnabled: el.plutoMqttEnabled.checked,
       mqttHost: el.plutoMqttHost.value || "192.168.2.1",
       mqttPort: numberValue(el.plutoMqttPort, 1883),
+      mqttProtocol: el.plutoMqttProtocol.value,
+      mqttDeviceId: el.plutoMqttDeviceId.value.trim(),
       callsign: el.plutoCallsign.value || "GB3GV",
       system: el.plutoSystem.value,
       txFrequencyHz: numberValue(el.plutoTxFrequency, 2400000000),
@@ -717,6 +725,8 @@ for (const input of [
   el.plutoMqttEnabled,
   el.plutoMqttHost,
   el.plutoMqttPort,
+  el.plutoMqttProtocol,
+  el.plutoMqttDeviceId,
   el.plutoCallsign,
   el.plutoSystem,
   el.plutoTxFrequency,

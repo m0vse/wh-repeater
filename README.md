@@ -26,6 +26,8 @@ This is the first working streaming test build. It can:
 - use the Pi hardware H.264 encoder when `h264_v4l2m2m` is available;
 - stream the generated output to an optional RTMP server;
 - publish PlutoPlus/F5OEO control over MQTT, including TX mute/PTT state;
+- provisionally select the Tezuka DATV MQTT protocol used by 7020/7035
+  PlutoSky/Fishball/LibreSDR-class firmware builds;
 - optionally drive a hardware GPIO PTT output for an external amplifier or
   sequencer.
 
@@ -147,7 +149,7 @@ The main sections are:
 - `receivers`: RX1-RX4 scan targets, dwell time, and hang time;
 - `analogue.sd1`: optional SD1 analogue receiver detection over I2C;
 - `pluto`: DVB-S/S2 transmit settings, symbol rate, calculated mux/video rates,
-  MQTT host, gain, callsign, and watermark text;
+  MQTT host, MQTT protocol/device id, gain, callsign, and watermark text;
 - `fallback`: static slide/video fallback settings and static-frame rate;
 - `streaming.rtmp`: optional direct RTMP output URL;
 - `hardwarePtt`: optional GPIO PTT output for amplifier/sequencer switching;
@@ -181,6 +183,14 @@ hours, hang-time access notices, or live retransmit. The line is forced inactive
 on config reload and daemon shutdown. Keep the GPIO output isolated from the RF
 amplifier keying circuit with suitable buffering or a sequencer; do not connect a
 Pi GPIO directly to an unknown amplifier PTT input.
+
+Tezuka/F5OEO DATV output is selected with `"mqttProtocol": "tezuka"` in the
+`pluto` config object, plus optional `"mqttDeviceId"` when the firmware's MQTT
+device id is not the same as the configured callsign. The daemon sends MPEG-TS
+over UDP to `pluto.address` and `pluto.port`, configures the Tezuka TS source
+with `tx/dvbs2/tssourcemode=0` and `tx/dvbs2/tssourceaddress=<address>:<port>`,
+and uses the serial-scoped `cmd/pluto/<device-id>/...` and
+`dt/pluto/<device-id>/...` topic layout.
 
 ## Source Layout
 

@@ -75,6 +75,17 @@
               <input id="pluto-callsign" type="text">
             </label>
             <label>
+              Pluto MQTT protocol
+              <select id="pluto-mqtt-protocol">
+                <option value="pluto-ori">Pluto ORI</option>
+                <option value="tezuka">Tezuka</option>
+              </select>
+            </label>
+            <label>
+              Pluto MQTT device ID
+              <input id="pluto-mqtt-device-id" type="text" placeholder="defaults to callsign">
+            </label>
+            <label>
               Pluto TS address
               <input id="pluto-address" type="text">
             </label>
@@ -403,6 +414,6 @@
     </div>
   </template>
 
-  <script src="/app.js?v=20260608-slides1" defer></script>
+  <script src="/app.js?v=20260608-tezuka1" defer></script>
 </body>
 </html>

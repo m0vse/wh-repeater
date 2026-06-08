@@ -635,6 +635,15 @@ RepeaterConfig configFromJson(std::string_view text)
         if (const auto* mqttPort = optionalMember(*pluto, "mqttPort")) {
             config.pluto.mqttPort = static_cast<std::uint16_t>(jsonUint32(*mqttPort, "pluto.mqttPort"));
         }
+        if (const auto* mqttProtocol = optionalMember(*pluto, "mqttProtocol")) {
+            config.pluto.mqttProtocol = jsonText(*mqttProtocol, "pluto.mqttProtocol");
+            if (config.pluto.mqttProtocol != "pluto-ori" && config.pluto.mqttProtocol != "tezuka") {
+                throw std::runtime_error{"pluto.mqttProtocol must be pluto-ori or tezuka"};
+            }
+        }
+        if (const auto* mqttDeviceId = optionalMember(*pluto, "mqttDeviceId")) {
+            config.pluto.mqttDeviceId = jsonText(*mqttDeviceId, "pluto.mqttDeviceId");
+        }
         if (const auto* callsign = optionalMember(*pluto, "callsign")) {
             config.pluto.callsign = jsonText(*callsign, "pluto.callsign");
         }
@@ -858,6 +867,8 @@ std::string configToJson(const RepeaterConfig& config)
         << "    \"mqttEnabled\": " << (config.pluto.mqttEnabled ? "true" : "false") << ",\n"
         << "    \"mqttHost\": " << jsonString(config.pluto.mqttHost) << ",\n"
         << "    \"mqttPort\": " << config.pluto.mqttPort << ",\n"
+        << "    \"mqttProtocol\": " << jsonString(config.pluto.mqttProtocol) << ",\n"
+        << "    \"mqttDeviceId\": " << jsonString(config.pluto.mqttDeviceId) << ",\n"
         << "    \"callsign\": " << jsonString(config.pluto.callsign) << ",\n"
         << "    \"system\": " << jsonString(config.pluto.system) << ",\n"
         << "    \"txFrequencyHz\": " << config.pluto.txFrequencyHz << ",\n"

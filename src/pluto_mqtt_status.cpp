@@ -270,6 +270,8 @@ PlutoMqttStatusWorker::PlutoMqttStatusWorker(PlutoConfig config)
     status_.enabled = config_.mqttEnabled;
     status_.host = config_.mqttHost;
     status_.port = config_.mqttPort;
+    status_.protocol = config_.mqttProtocol;
+    status_.deviceId = config_.mqttDeviceId.empty() ? config_.callsign : config_.mqttDeviceId;
     status_.callsign = config_.callsign;
     if (!config_.mqttEnabled) {
         status_.error = "MQTT disabled";
@@ -296,7 +298,8 @@ PlutoMqttStatus PlutoMqttStatusWorker::snapshot() const
 
 void PlutoMqttStatusWorker::workerLoop()
 {
-    const auto topic = "dt/pluto/" + config_.callsign + "/#";
+    const auto deviceId = config_.mqttDeviceId.empty() ? config_.callsign : config_.mqttDeviceId;
+    const auto topic = "dt/pluto/" + deviceId + "/#";
     while (!stopping_.load()) {
         const auto fd = connectTcp(config_.mqttHost, config_.mqttPort);
         if (fd < 0) {
@@ -379,7 +382,8 @@ void PlutoMqttStatusWorker::setConnected(bool connected)
 
 void PlutoMqttStatusWorker::recordStatus(std::string topic, std::string payload)
 {
-    const auto prefix = "dt/pluto/" + config_.callsign + "/";
+    const auto deviceId = config_.mqttDeviceId.empty() ? config_.callsign : config_.mqttDeviceId;
+    const auto prefix = "dt/pluto/" + deviceId + "/";
     if (topic.rfind(prefix, 0) == 0) {
         topic.erase(0, prefix.size());
     }
