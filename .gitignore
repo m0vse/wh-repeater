@@ -10,3 +10,7 @@ out/
 *.pdb
 *.ilk
 *.log
+PIC-Lib.zip
+slides/
+package.json
+package-lock.json

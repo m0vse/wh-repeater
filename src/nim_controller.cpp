@@ -597,7 +597,7 @@ public:
         } catch (const std::exception& ex) {
             status.state = ReceiverState::fault;
             status.updatedAt = std::chrono::steady_clock::now();
-            setRepeaters(-1);
+            disableRepeatersBestEffort("tune failure cleanup");
             std::cerr << "wh-repeater: tune RX" << receiver.value << " failed: " << ex.what() << '\n';
         }
     }
@@ -613,11 +613,16 @@ public:
         const auto hw = hardwareFor(receiver);
         auto& status = statusFor(receiver);
 
-        if (nimPresent_[hw.nimIndex]) {
-            setRepeaters(hw.nimIndex);
-            configureTuner(hw, 0, status.target.value_or(ScanTarget{}));
-            setRepeaters(-1);
-            i2c_.writeReg16(hw.nimAddress, dmdIStateRegister(hw.tuner), 0x1c);
+        try {
+            if (nimPresent_[hw.nimIndex]) {
+                setRepeaters(hw.nimIndex);
+                configureTuner(hw, 0, status.target.value_or(ScanTarget{}));
+                setRepeaters(-1);
+                i2c_.writeReg16(hw.nimAddress, dmdIStateRegister(hw.tuner), 0x1c);
+            }
+        } catch (...) {
+            disableRepeatersBestEffort("stop failure cleanup");
+            throw;
         }
 
         status.state = ReceiverState::idle;
@@ -903,6 +908,16 @@ private:
             const auto addr = index == 0 ? nimDemodAddrA : nimDemodAddrB;
             i2c_.writeReg16(addr, stv0910P1I2cRpt, desired ? repeaterOn : repeaterOff);
             repeaterOn_[index] = desired;
+        }
+    }
+
+    void disableRepeatersBestEffort(std::string_view context)
+    {
+        try {
+            setRepeaters(-1);
+        } catch (const std::exception& ex) {
+            std::cerr << "wh-repeater: disable I2C repeaters during " << context
+                      << " failed: " << ex.what() << '\n';
         }
     }
 

@@ -20,8 +20,6 @@
 #include "whrepeater/i2c_bus_lock.hpp"
 
 #include <linux/i2c-dev.h>
-#include <linux/i2c.h>
-
 #include <array>
 #include <cerrno>
 #include <cstring>
@@ -51,6 +49,8 @@ constexpr std::array<std::string_view, 9> sourceMap{
 };
 constexpr int lockSamplesRequired{3};
 constexpr int unlockSamplesRequired{2};
+constexpr int i2cMaxRetries{5};
+constexpr useconds_t i2cRetryDelayUs{100000};
 
 std::optional<std::uint8_t> sourceValue(std::string_view source)
 {
@@ -179,18 +179,16 @@ AnalogueStatus Sd1Controller::poll()
 
 std::optional<std::uint8_t> Sd1Controller::readRegister(int fd, std::uint8_t reg, std::string& error) const
 {
-    std::uint8_t value{};
-    i2c_msg messages[2]{
-        i2c_msg{.addr = config_.i2cAddress, .flags = 0, .len = 1, .buf = &reg},
-        i2c_msg{.addr = config_.i2cAddress, .flags = I2C_M_RD, .len = 1, .buf = &value},
-    };
-    i2c_rdwr_ioctl_data transfer{.msgs = messages, .nmsgs = 2};
-
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        if (::ioctl(fd, I2C_RDWR, &transfer) >= 0) {
-            return value;
+    for (int attempt = 0; attempt < i2cMaxRetries; ++attempt) {
+        const auto written = ::write(fd, &reg, 1);
+        if (written == 1) {
+            std::uint8_t value{};
+            const auto bytesRead = ::read(fd, &value, 1);
+            if (bytesRead == 1) {
+                return value;
+            }
         }
-        ::usleep(25000);
+        ::usleep(i2cRetryDelayUs);
     }
 
     error = systemError("read SD1 register " + std::to_string(reg));
@@ -200,14 +198,12 @@ std::optional<std::uint8_t> Sd1Controller::readRegister(int fd, std::uint8_t reg
 bool Sd1Controller::writeRegister(int fd, std::uint8_t reg, std::uint8_t value, std::string& error) const
 {
     std::array<std::uint8_t, 2> buffer{reg, value};
-    i2c_msg message{.addr = config_.i2cAddress, .flags = 0, .len = buffer.size(), .buf = buffer.data()};
-    i2c_rdwr_ioctl_data transfer{.msgs = &message, .nmsgs = 1};
 
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        if (::ioctl(fd, I2C_RDWR, &transfer) >= 0) {
+    for (int attempt = 0; attempt < i2cMaxRetries; ++attempt) {
+        if (::write(fd, buffer.data(), buffer.size()) == static_cast<ssize_t>(buffer.size())) {
             return true;
         }
-        ::usleep(25000);
+        ::usleep(i2cRetryDelayUs);
     }
 
     error = systemError("write SD1 register " + std::to_string(reg));

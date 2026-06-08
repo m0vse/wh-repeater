@@ -157,6 +157,22 @@
               <input id="pluto-pilots" type="checkbox">
               DVB-S2 pilots
             </label>
+            <label class="check">
+              <input id="hardware-ptt-enabled" type="checkbox">
+              Hardware PTT enabled
+            </label>
+            <label>
+              PTT GPIO chip
+              <input id="hardware-ptt-chip" type="text" value="/dev/gpiochip0">
+            </label>
+            <label>
+              PTT GPIO line
+              <input id="hardware-ptt-line" type="number" min="0" value="0">
+            </label>
+            <label class="check">
+              <input id="hardware-ptt-active-high" type="checkbox">
+              PTT active high
+            </label>
           </div>
         </section>
 
@@ -194,6 +210,18 @@
             <label class="wide">
               Fallback still path
               <input id="fallback-still" type="text" placeholder="/var/lib/wh-repeater/fallback.jpg">
+            </label>
+            <label class="wide">
+              Slide folder
+              <input id="fallback-slide-directory" type="text" placeholder="/var/lib/wh-repeater/slides">
+            </label>
+            <label class="wide">
+              Christmas slide folder
+              <input id="fallback-xmas-slide-directory" type="text" placeholder="/var/lib/wh-repeater/slides/christmas">
+            </label>
+            <label>
+              Slide duration seconds
+              <input id="fallback-slide-duration" type="number" min="1" value="10">
             </label>
             <label class="wide">
               Fallback video paths
@@ -243,6 +271,14 @@
               Ident interval seconds
               <input id="ident-interval" type="number" min="0">
             </label>
+            <label>
+              Morse tone Hz
+              <input id="ident-morse-tone" type="number" min="100" max="3000" value="650">
+            </label>
+            <label>
+              Morse WPM
+              <input id="ident-morse-wpm" type="number" min="5" max="40" value="10">
+            </label>
           </div>
         </section>
 
@@ -255,7 +291,7 @@
             </label>
             <label>
               SD1 I2C device
-              <input id="sd1-i2c-device" type="text" value="/dev/i2c-1">
+              <input id="sd1-i2c-device" type="text" value="/dev/i2c-0">
             </label>
             <label>
               SD1 I2C address
@@ -367,6 +403,6 @@
     </div>
   </template>
 
-  <script src="/app.js?v=20260608-rtmp1" defer></script>
+  <script src="/app.js?v=20260608-slides1" defer></script>
 </body>
 </html>

@@ -19,6 +19,7 @@
 #include "whrepeater/daemon.hpp"
 
 #include "whrepeater/api_server.hpp"
+#include "whrepeater/hardware_ptt.hpp"
 #include "whrepeater/ident.hpp"
 #include "whrepeater/media_pipeline.hpp"
 #include "whrepeater/nim_controller.hpp"
@@ -99,24 +100,20 @@ std::chrono::milliseconds hangTimeForReceiver(const RepeaterConfig& config, Rece
     return std::chrono::seconds{5};
 }
 
-std::string receiverName(ReceiverId receiver)
+std::string repeaterName(const RepeaterConfig& config)
 {
-    return "RX" + std::to_string(receiver.value);
-}
-
-std::string targetLabel(const ScanTarget& target)
-{
-    if (!target.label.empty()) {
-        return target.label;
+    if (!config.pluto.callsign.empty()) {
+        return config.pluto.callsign;
     }
-    std::ostringstream out;
-    out << target.frequencyKhz << " kHz / " << target.symbolRateKs << " kS";
-    return out.str();
+    if (!config.pluto.watermarkText.empty()) {
+        return config.pluto.watermarkText;
+    }
+    return "WH Repeater";
 }
 
-std::string accessMessage(const ActiveInput& active)
+std::string accessMessage(const RepeaterConfig& config)
 {
-    return "(" + receiverName(active.receiver) + ") has just been accessed on (" + targetLabel(active.target) + ")";
+    return repeaterName(config) + "\nhas just been accessed";
 }
 
 } // namespace
@@ -144,6 +141,7 @@ int Daemon::run()
     auto media = std::make_unique<MediaPipeline>(config_);
     auto plutoStatus = std::make_unique<PlutoMqttStatusWorker>(config_.pluto);
     auto sd1 = std::make_unique<Sd1StatusWorker>(config_.analogue.sd1);
+    HardwarePtt hardwarePtt{config_.hardwarePtt};
     IdentInserter ident{config_.ident};
     ApiServer api;
     std::optional<std::string> accessNotice;
@@ -158,9 +156,15 @@ int Daemon::run()
 
     while (!shutdownRequested.load()) {
         if (auto pendingConfig = api.takePendingConfig(); pendingConfig.has_value()) {
+            hardwarePtt.setTransmitEnabled(false);
             sd1.reset();
             for (const auto& receiver : config_.receivers) {
-                nim->stop(receiver.receiver);
+                try {
+                    nim->stop(receiver.receiver);
+                } catch (const std::exception& ex) {
+                    std::cerr << "wh-repeater: stop RX" << receiver.receiver.value
+                              << " during config reload failed: " << ex.what() << '\n';
+                }
             }
             config_ = std::move(*pendingConfig);
             scanner = ScanScheduler{config_.receivers};
@@ -168,6 +172,7 @@ int Daemon::run()
             media = std::make_unique<MediaPipeline>(config_);
             plutoStatus = std::make_unique<PlutoMqttStatusWorker>(config_.pluto);
             sd1 = std::make_unique<Sd1StatusWorker>(config_.analogue.sd1);
+            hardwarePtt = HardwarePtt{config_.hardwarePtt};
             ident = IdentInserter{config_.ident};
             api.updateConfig(config_);
             if (!configPath_.empty()) {
@@ -188,7 +193,7 @@ int Daemon::run()
         api.updateStatus(statuses, active);
 
         if (active.has_value()) {
-            accessNotice = accessMessage(*active);
+            accessNotice = accessMessage(config_);
             accessNoticeUntil = now + hangTimeForReceiver(config_, active->receiver);
         } else if (accessNotice.has_value() && now >= accessNoticeUntil) {
             accessNotice.reset();
@@ -204,6 +209,7 @@ int Daemon::run()
         media->select(active);
         media->setBeaconAllowed(beaconAllowed);
         media->setAccessNotice(accessNotice);
+        hardwarePtt.setTransmitEnabled(active.has_value() || (config_.fallback.enabled && (beaconAllowed || accessNotice.has_value())));
         router.select(std::move(active));
         router.pump(*nim, *media);
         media->tick(now);
@@ -213,6 +219,7 @@ int Daemon::run()
 
     std::cout << "wh-repeater daemon shutting down\n";
     media.reset();
+    hardwarePtt.setTransmitEnabled(false);
     plutoStatus.reset();
     sd1.reset();
     for (const auto& receiver : config_.receivers) {

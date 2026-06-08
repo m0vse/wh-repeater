@@ -25,7 +25,9 @@ This is the first working streaming test build. It can:
 - generate a continuous MPEG-TS media pipeline with blue fallback/status slides;
 - use the Pi hardware H.264 encoder when `h264_v4l2m2m` is available;
 - stream the generated output to an optional RTMP server;
-- publish PlutoPlus/F5OEO control over MQTT, including TX mute/PTT state.
+- publish PlutoPlus/F5OEO control over MQTT, including TX mute/PTT state;
+- optionally drive a hardware GPIO PTT output for an external amplifier or
+  sequencer.
 
 The daemon still has known gaps. Received DVB transport streams are not yet
 decoded, watermarked, and re-encoded into the generated output path. The current
@@ -148,6 +150,7 @@ The main sections are:
   MQTT host, gain, callsign, and watermark text;
 - `fallback`: static slide/video fallback settings and static-frame rate;
 - `streaming.rtmp`: optional direct RTMP output URL;
+- `hardwarePtt`: optional GPIO PTT output for amplifier/sequencer switching;
 - `beaconSchedule`: operating hours for beacon/slideshow TX versus sleep mode;
 - `ident`: service name and ident interval;
 - `selection`: minimum signal quality thresholds.
@@ -167,9 +170,17 @@ The implementation expects the existing whdriver interface exposed by the kernel
 module. It does not create the device node itself.
 
 SD1 access is direct C++ I2C using the PiVideo register protocol. The default SD1
-device is `/dev/i2c-1` at address `0x40`. NIM and SD1 I2C access share a process
-mutex so service restarts and config reloads do not intentionally overlap bus
-transactions.
+device is `/dev/i2c-0` at address `0x40`, keeping it separate from the NIM bus on
+`/dev/i2c-1`. NIM and SD1 I2C access still share a process mutex so service
+restarts and config reloads do not intentionally overlap bus transactions.
+
+Hardware PTT is disabled by default. When enabled, the daemon uses the Linux GPIO
+character-device API, normally `/dev/gpiochip0`, and asserts the configured line
+whenever the repeater is actively transmitting: beacon/slideshow during operating
+hours, hang-time access notices, or live retransmit. The line is forced inactive
+on config reload and daemon shutdown. Keep the GPIO output isolated from the RF
+amplifier keying circuit with suitable buffering or a sequencer; do not connect a
+Pi GPIO directly to an unknown amplifier PTT input.
 
 ## Source Layout
 
@@ -178,6 +189,8 @@ transactions.
 - `src/signal_arbitrator.cpp`: active-input selection.
 - `src/media_pipeline.cpp`: generated MPEG-TS, fallback/status slides, H.264
   encoding, and RTMP output.
+- `src/hardware_ptt.cpp`: optional GPIO PTT output for amplifier/sequencer
+  control.
 - `src/pluto_sink.cpp`: Pluto UDP TS output and MQTT transmit control.
 - `src/pluto_mqtt_status.cpp`: Pluto MQTT status subscription.
 - `src/sd1_controller.cpp`: SD1 analogue receiver status over I2C.

@@ -695,6 +695,16 @@ RepeaterConfig configFromJson(std::string_view text)
         if (const auto* stillPath = optionalMember(*fallback, "stillPath")) {
             config.fallback.stillPath = jsonText(*stillPath, "fallback.stillPath");
         }
+        if (const auto* slideDirectory = optionalMember(*fallback, "slideDirectory")) {
+            config.fallback.slideDirectory = jsonText(*slideDirectory, "fallback.slideDirectory");
+        }
+        if (const auto* christmasSlideDirectory = optionalMember(*fallback, "christmasSlideDirectory")) {
+            config.fallback.christmasSlideDirectory = jsonText(*christmasSlideDirectory, "fallback.christmasSlideDirectory");
+        }
+        if (const auto* slideDurationSeconds = optionalMember(*fallback, "slideDurationSeconds")) {
+            config.fallback.slideDuration = std::chrono::milliseconds{
+                std::max(1, jsonInt(*slideDurationSeconds, "fallback.slideDurationSeconds")) * 1000};
+        }
         if (const auto* inputTimeoutMs = optionalMember(*fallback, "inputTimeoutMs")) {
             config.fallback.inputTimeout = std::chrono::milliseconds{jsonInt(*inputTimeoutMs, "fallback.inputTimeoutMs")};
         }
@@ -723,6 +733,21 @@ RepeaterConfig configFromJson(std::string_view text)
         }
     }
 
+    if (const auto* hardwarePtt = optionalMember(root, "hardwarePtt")) {
+        if (const auto* enabled = optionalMember(*hardwarePtt, "enabled")) {
+            config.hardwarePtt.enabled = jsonBool(*enabled, "hardwarePtt.enabled");
+        }
+        if (const auto* chip = optionalMember(*hardwarePtt, "chip")) {
+            config.hardwarePtt.chip = jsonText(*chip, "hardwarePtt.chip");
+        }
+        if (const auto* line = optionalMember(*hardwarePtt, "line")) {
+            config.hardwarePtt.line = jsonUint32(*line, "hardwarePtt.line");
+        }
+        if (const auto* activeHigh = optionalMember(*hardwarePtt, "activeHigh")) {
+            config.hardwarePtt.activeHigh = jsonBool(*activeHigh, "hardwarePtt.activeHigh");
+        }
+    }
+
     if (const auto* schedule = optionalMember(root, "beaconSchedule")) {
         if (const auto* enabled = optionalMember(*schedule, "enabled")) {
             config.beaconSchedule.enabled = jsonBool(*enabled, "beaconSchedule.enabled");
@@ -744,6 +769,12 @@ RepeaterConfig configFromJson(std::string_view text)
         }
         if (const auto* intervalSeconds = optionalMember(*ident, "intervalSeconds")) {
             config.ident.interval = std::chrono::seconds{jsonInt(*intervalSeconds, "ident.intervalSeconds")};
+        }
+        if (const auto* morseToneHz = optionalMember(*ident, "morseToneHz")) {
+            config.ident.morseToneHz = std::clamp(jsonUint32(*morseToneHz, "ident.morseToneHz"), 100U, 3000U);
+        }
+        if (const auto* morseWpm = optionalMember(*ident, "morseWpm")) {
+            config.ident.morseWpm = std::clamp(jsonUint32(*morseWpm, "ident.morseWpm"), 5U, 40U);
         }
     }
 
@@ -846,6 +877,9 @@ std::string configToJson(const RepeaterConfig& config)
         << "  \"fallback\": {\n"
         << "    \"enabled\": " << (config.fallback.enabled ? "true" : "false") << ",\n"
         << "    \"stillPath\": " << jsonString(config.fallback.stillPath) << ",\n"
+        << "    \"slideDirectory\": " << jsonString(config.fallback.slideDirectory) << ",\n"
+        << "    \"christmasSlideDirectory\": " << jsonString(config.fallback.christmasSlideDirectory) << ",\n"
+        << "    \"slideDurationSeconds\": " << (config.fallback.slideDuration.count() / 1000) << ",\n"
         << "    \"inputTimeoutMs\": " << config.fallback.inputTimeout.count() << ",\n"
         << "    \"staticFrameRate\": " << config.fallback.staticFrameRate << ",\n"
         << "    \"videoPaths\": [";
@@ -863,6 +897,12 @@ std::string configToJson(const RepeaterConfig& config)
         << "      \"url\": " << jsonString(config.streaming.rtmp.url) << "\n"
         << "    }\n"
         << "  },\n"
+        << "  \"hardwarePtt\": {\n"
+        << "    \"enabled\": " << (config.hardwarePtt.enabled ? "true" : "false") << ",\n"
+        << "    \"chip\": " << jsonString(config.hardwarePtt.chip) << ",\n"
+        << "    \"line\": " << config.hardwarePtt.line << ",\n"
+        << "    \"activeHigh\": " << (config.hardwarePtt.activeHigh ? "true" : "false") << "\n"
+        << "  },\n"
         << "  \"beaconSchedule\": {\n"
         << "    \"enabled\": " << (config.beaconSchedule.enabled ? "true" : "false") << ",\n"
         << "    \"startTime\": " << jsonString(config.beaconSchedule.startTime) << ",\n"
@@ -871,7 +911,9 @@ std::string configToJson(const RepeaterConfig& config)
         << "  \"ident\": {\n"
         << "    \"enabled\": " << (config.ident.enabled ? "true" : "false") << ",\n"
         << "    \"serviceName\": " << jsonString(config.ident.serviceName) << ",\n"
-        << "    \"intervalSeconds\": " << config.ident.interval.count() << "\n"
+        << "    \"intervalSeconds\": " << config.ident.interval.count() << ",\n"
+        << "    \"morseToneHz\": " << config.ident.morseToneHz << ",\n"
+        << "    \"morseWpm\": " << config.ident.morseWpm << "\n"
         << "  },\n"
         << "  \"analogue\": {\n"
         << "    \"sd1\": {\n"

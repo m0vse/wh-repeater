@@ -28,6 +28,7 @@ add_executable(wh-repeater
     src/pluto_sink.cpp
     src/pluto_mqtt_status.cpp
     src/ident.cpp
+    src/hardware_ptt.cpp
     src/i2c_bus_lock.cpp
     src/media_pipeline.cpp
     src/sd1_controller.cpp

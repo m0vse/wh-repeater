@@ -55,6 +55,9 @@ struct FallbackConfig {
     bool enabled{true};
     std::string stillPath;
     std::vector<std::string> videoPaths;
+    std::string slideDirectory{"/var/lib/wh-repeater/slides"};
+    std::string christmasSlideDirectory{"/var/lib/wh-repeater/slides/christmas"};
+    std::chrono::milliseconds slideDuration{10000};
     std::chrono::milliseconds inputTimeout{1500};
     std::uint32_t staticFrameRate{2};
 };
@@ -78,13 +81,22 @@ struct IdentConfig {
     bool enabled{true};
     std::string serviceName{"WH Repeater"};
     std::chrono::seconds interval{std::chrono::minutes{10}};
+    std::uint32_t morseToneHz{650};
+    std::uint32_t morseWpm{10};
+};
+
+struct HardwarePttConfig {
+    bool enabled{false};
+    std::string chip{"/dev/gpiochip0"};
+    std::uint32_t line{0};
+    bool activeHigh{true};
 };
 
 struct Sd1Config {
     bool enabled{true};
     ReceiverId receiver{5};
     std::string deviceId{"sd1"};
-    std::string i2cDevice{"/dev/i2c-1"};
+    std::string i2cDevice{"/dev/i2c-0"};
     std::uint8_t i2cAddress{0x40};
     std::string source{"auto"};
 };
@@ -108,6 +120,7 @@ struct RepeaterConfig {
     StreamingConfig streaming;
     BeaconScheduleConfig beaconSchedule;
     IdentConfig ident;
+    HardwarePttConfig hardwarePtt;
     AnalogueConfig analogue;
     std::chrono::milliseconds statusInterval{500};
     double minimumMerDb{2.0};

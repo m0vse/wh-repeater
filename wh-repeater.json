@@ -29,6 +29,9 @@
   "fallback": {
     "enabled": true,
     "stillPath": "",
+    "slideDirectory": "/var/lib/wh-repeater/slides",
+    "christmasSlideDirectory": "/var/lib/wh-repeater/slides/christmas",
+    "slideDurationSeconds": 10,
     "staticFrameRate": 2,
     "inputTimeoutMs": 1500,
     "videoPaths": []
@@ -39,6 +42,12 @@
       "url": ""
     }
   },
+  "hardwarePtt": {
+    "enabled": false,
+    "chip": "/dev/gpiochip0",
+    "line": 0,
+    "activeHigh": true
+  },
   "beaconSchedule": {
     "enabled": true,
     "startTime": "09:00",
@@ -47,14 +56,16 @@
   "ident": {
     "enabled": true,
     "serviceName": "GB3GV",
-    "intervalSeconds": 600
+    "intervalSeconds": 600,
+    "morseToneHz": 650,
+    "morseWpm": 10
   },
   "analogue": {
     "sd1": {
       "enabled": true,
       "receiverId": 5,
       "deviceId": "sd1",
-      "i2cDevice": "/dev/i2c-1",
+      "i2cDevice": "/dev/i2c-0",
       "i2cAddress": 64,
       "source": "auto"
     }

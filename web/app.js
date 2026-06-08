@@ -54,11 +54,18 @@ const el = {
   videoBitrate: document.querySelector("#video-bitrate"),
   audioBitrate: document.querySelector("#audio-bitrate"),
   plutoFec: document.querySelector("#pluto-fec"),
+  hardwarePttEnabled: document.querySelector("#hardware-ptt-enabled"),
+  hardwarePttChip: document.querySelector("#hardware-ptt-chip"),
+  hardwarePttLine: document.querySelector("#hardware-ptt-line"),
+  hardwarePttActiveHigh: document.querySelector("#hardware-ptt-active-high"),
   watermarkText: document.querySelector("#watermark-text"),
   fallbackEnabled: document.querySelector("#fallback-enabled"),
   fallbackTimeout: document.querySelector("#fallback-timeout"),
   fallbackStaticFps: document.querySelector("#fallback-static-fps"),
   fallbackStill: document.querySelector("#fallback-still"),
+  fallbackSlideDirectory: document.querySelector("#fallback-slide-directory"),
+  fallbackXmasSlideDirectory: document.querySelector("#fallback-xmas-slide-directory"),
+  fallbackSlideDuration: document.querySelector("#fallback-slide-duration"),
   fallbackVideos: document.querySelector("#fallback-videos"),
   rtmpEnabled: document.querySelector("#rtmp-enabled"),
   rtmpUrl: document.querySelector("#rtmp-url"),
@@ -74,6 +81,8 @@ const el = {
   identEnabled: document.querySelector("#ident-enabled"),
   serviceName: document.querySelector("#service-name"),
   identInterval: document.querySelector("#ident-interval"),
+  identMorseTone: document.querySelector("#ident-morse-tone"),
+  identMorseWpm: document.querySelector("#ident-morse-wpm"),
   receiverTemplate: document.querySelector("#receiver-template"),
   targetTemplate: document.querySelector("#target-template"),
 };
@@ -352,11 +361,18 @@ function fillConfigForm() {
   el.videoBitrate.value = config.pluto?.videoBitrateKbps ?? 900;
   el.audioBitrate.value = config.pluto?.audioBitrateKbps ?? 96;
   el.plutoFec.value = config.pluto?.fec ?? "1/2";
+  el.hardwarePttEnabled.checked = Boolean(config.hardwarePtt?.enabled);
+  el.hardwarePttChip.value = config.hardwarePtt?.chip ?? "/dev/gpiochip0";
+  el.hardwarePttLine.value = config.hardwarePtt?.line ?? 0;
+  el.hardwarePttActiveHigh.checked = config.hardwarePtt?.activeHigh ?? true;
   el.watermarkText.value = config.pluto?.watermarkText ?? "WH Repeater";
   el.fallbackEnabled.checked = config.fallback?.enabled ?? true;
   el.fallbackTimeout.value = config.fallback?.inputTimeoutMs ?? 1500;
   el.fallbackStaticFps.value = config.fallback?.staticFrameRate ?? 2;
   el.fallbackStill.value = config.fallback?.stillPath ?? "";
+  el.fallbackSlideDirectory.value = config.fallback?.slideDirectory ?? "/var/lib/wh-repeater/slides";
+  el.fallbackXmasSlideDirectory.value = config.fallback?.christmasSlideDirectory ?? "/var/lib/wh-repeater/slides/christmas";
+  el.fallbackSlideDuration.value = config.fallback?.slideDurationSeconds ?? 10;
   el.fallbackVideos.value = (config.fallback?.videoPaths ?? []).join(",");
   el.rtmpEnabled.checked = Boolean(config.streaming?.rtmp?.enabled);
   el.rtmpUrl.value = config.streaming?.rtmp?.url ?? "";
@@ -366,12 +382,14 @@ function fillConfigForm() {
   el.sd1Enabled.checked = config.analogue?.sd1?.enabled ?? true;
   el.sd1ReceiverId.value = config.analogue?.sd1?.receiverId ?? 5;
   el.sd1DeviceId.value = config.analogue?.sd1?.deviceId ?? "sd1";
-  el.sd1I2cDevice.value = config.analogue?.sd1?.i2cDevice ?? "/dev/i2c-1";
+  el.sd1I2cDevice.value = config.analogue?.sd1?.i2cDevice ?? "/dev/i2c-0";
   el.sd1I2cAddress.value = config.analogue?.sd1?.i2cAddress ?? 64;
   el.sd1Source.value = config.analogue?.sd1?.source ?? "auto";
   el.identEnabled.checked = Boolean(config.ident?.enabled);
   el.serviceName.value = config.ident?.serviceName ?? "WH Repeater";
   el.identInterval.value = config.ident?.intervalSeconds ?? 600;
+  el.identMorseTone.value = config.ident?.morseToneHz ?? 650;
+  el.identMorseWpm.value = config.ident?.morseWpm ?? 10;
 
   el.receivers.innerHTML = "";
   for (const receiver of config.receivers || []) {
@@ -497,6 +515,9 @@ function readConfigForm() {
       inputTimeoutMs: numberValue(el.fallbackTimeout, 1500),
       staticFrameRate: Math.min(25, Math.max(1, numberValue(el.fallbackStaticFps, 2))),
       stillPath: el.fallbackStill.value,
+      slideDirectory: el.fallbackSlideDirectory.value || "/var/lib/wh-repeater/slides",
+      christmasSlideDirectory: el.fallbackXmasSlideDirectory.value || "/var/lib/wh-repeater/slides/christmas",
+      slideDurationSeconds: numberValue(el.fallbackSlideDuration, 10),
       videoPaths: el.fallbackVideos.value.split(",").map((value) => value.trim()).filter(Boolean),
     },
     streaming: {
@@ -504,6 +525,12 @@ function readConfigForm() {
         enabled: el.rtmpEnabled.checked,
         url: el.rtmpUrl.value.trim(),
       },
+    },
+    hardwarePtt: {
+      enabled: el.hardwarePttEnabled.checked,
+      chip: el.hardwarePttChip.value || "/dev/gpiochip0",
+      line: numberValue(el.hardwarePttLine, 0),
+      activeHigh: el.hardwarePttActiveHigh.checked,
     },
     beaconSchedule: {
       enabled: el.beaconScheduleEnabled.checked,
@@ -515,7 +542,7 @@ function readConfigForm() {
         enabled: el.sd1Enabled.checked,
         receiverId: numberValue(el.sd1ReceiverId, 5),
         deviceId: el.sd1DeviceId.value || "sd1",
-        i2cDevice: el.sd1I2cDevice.value || "/dev/i2c-1",
+        i2cDevice: el.sd1I2cDevice.value || "/dev/i2c-0",
         i2cAddress: numberValue(el.sd1I2cAddress, 64),
         source: el.sd1Source.value,
       },
@@ -524,6 +551,8 @@ function readConfigForm() {
       enabled: el.identEnabled.checked,
       serviceName: el.serviceName.value,
       intervalSeconds: numberValue(el.identInterval, 600),
+      morseToneHz: numberValue(el.identMorseTone, 650),
+      morseWpm: numberValue(el.identMorseWpm, 10),
     },
     receivers,
   };
@@ -700,11 +729,18 @@ for (const input of [
   el.plutoConstellation,
   el.audioBitrate,
   el.plutoFec,
+  el.hardwarePttEnabled,
+  el.hardwarePttChip,
+  el.hardwarePttLine,
+  el.hardwarePttActiveHigh,
   el.watermarkText,
   el.fallbackEnabled,
   el.fallbackTimeout,
   el.fallbackStaticFps,
   el.fallbackStill,
+  el.fallbackSlideDirectory,
+  el.fallbackXmasSlideDirectory,
+  el.fallbackSlideDuration,
   el.fallbackVideos,
   el.rtmpEnabled,
   el.rtmpUrl,
@@ -720,6 +756,8 @@ for (const input of [
   el.identEnabled,
   el.serviceName,
   el.identInterval,
+  el.identMorseTone,
+  el.identMorseWpm,
 ]) {
   input.addEventListener("input", () => {
     if (input === el.muxRate) {
