@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - Web Management Stylesheet
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Defines the responsive visual layout for the repeater management UI, including receiver cards, configuration sections, status panels, and controls.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
 :root {
   color-scheme: light;
   font-family: Arial, Helvetica, sans-serif;

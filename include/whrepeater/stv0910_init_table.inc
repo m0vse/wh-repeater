@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - STV0910 Initialisation Table
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Contains the STV0910 register/value table used by the Serit NIM controller when bringing the demodulators into a known operating state.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
     RegisterValue{0xf113, 0x00},
     RegisterValue{0xf114, 0x00},
     RegisterValue{0xf11a, 0x05},

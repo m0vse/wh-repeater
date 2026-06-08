@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - Receiver Scan Scheduler
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Implements scan target rotation, retune dwell timing, lock hold behaviour, and hang-time state after a received signal is lost.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
 #include "whrepeater/scan_scheduler.hpp"
 
 #include <algorithm>

@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - Signal Arbitrator Interface
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Declares the active-input selector that chooses the receiver allowed to drive the output path based on lock state and quality thresholds.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
 #pragma once
 
 #include "whrepeater/config.hpp"

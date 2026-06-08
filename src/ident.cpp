@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - Ident Helper Implementation
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Implements the minimal ident timer helper used while full transport-stream service-ident insertion remains a future expansion point.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
 #include "whrepeater/ident.hpp"
 
 #include <utility>

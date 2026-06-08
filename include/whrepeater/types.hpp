@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - Shared Domain Types
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Defines core repeater domain types, receiver identifiers, scan targets, receiver status snapshots, and active-input selection records.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
 #pragma once
 
 #include <chrono>

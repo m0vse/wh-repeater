@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - SD1 Analogue Receiver Controller
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Implements direct I2C/PiVideo register access for SD1 detection and lock reporting, including debouncing and background status polling.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
 #include "whrepeater/sd1_controller.hpp"
 
 #include "whrepeater/i2c_bus_lock.hpp"

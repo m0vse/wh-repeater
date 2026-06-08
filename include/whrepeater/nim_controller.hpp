@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - NIM Controller Interface
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Declares the receiver hardware abstraction for the Serit NIMs, STV0910 demodulators, STV6120 tuners, PIC control, and whdriver packet access.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
 #pragma once
 
 #include "whrepeater/types.hpp"

@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - Daemon Orchestrator
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Runs the main service loop, owns hardware and media subsystems, handles API config reloads, signal shutdown, scheduling, arbitration, and transmit state.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
 #include "whrepeater/daemon.hpp"
 
 #include "whrepeater/api_server.hpp"

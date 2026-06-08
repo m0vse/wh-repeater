@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - Daemon Entry Point
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Loads configuration, selects the requested config path, constructs the daemon, and reports top-level startup/runtime failures.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
 #include "whrepeater/config.hpp"
 #include "whrepeater/daemon.hpp"
 

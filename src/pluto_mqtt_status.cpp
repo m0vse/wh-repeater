@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - Pluto MQTT Status Client
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Implements MQTT connection, subscription, parsing, and snapshot reporting for Pluto/F5OEO transmit status topics.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
 #include "whrepeater/pluto_mqtt_status.hpp"
 
 #include <array>

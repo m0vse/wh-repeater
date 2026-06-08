@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - Serit NIM Hardware Controller
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Ports Winterhill hardware access into C++ for whdriver, Serit NIM selection, STV0910 demodulators, STV6120 tuners, PIC control, TS reads, and receiver status.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
 #include "whrepeater/nim_controller.hpp"
 
 #include "whrepeater/i2c_bus_lock.hpp"

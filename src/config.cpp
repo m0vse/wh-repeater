@@ -1,3 +1,19 @@
+/*
+ * ============================================================================
+ *  wh-repeater - Configuration Parser and Writer
+ * ============================================================================
+ *  Copyright (c) 2026 Phil Taylor (M0VSE)
+ *
+ *  Purpose:
+ *    Implements JSON parsing, validation, serialization, defaults, scan-target handling, and derived Pluto mux/video bitrate calculations.
+ *
+ *  Project notes:
+ *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
+ *    It uses the original Winterhill application only as hardware reference and
+ *    talks to the existing whdriver kernel module for board access.
+ * ============================================================================
+ */
+
 #include "whrepeater/config.hpp"
 
 #include <algorithm>
