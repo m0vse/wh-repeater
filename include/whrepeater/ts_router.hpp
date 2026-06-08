@@ -9,6 +9,8 @@
 
 namespace whrepeater {
 
+class NimController;
+
 class TsSink {
 public:
     virtual ~TsSink() = default;
@@ -18,9 +20,11 @@ public:
 class TsRouter {
 public:
     void select(std::optional<ActiveInput> input);
-    void pump(TsSink& sink);
+    void pump(NimController& nim, TsSink& sink);
 
 private:
+    static constexpr std::size_t maxPacketsPerPump{256};
+
     std::optional<ActiveInput> active_;
 };
 

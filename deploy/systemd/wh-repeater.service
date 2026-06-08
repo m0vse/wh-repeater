@@ -1,0 +1,16 @@
+[Unit]
+Description=WH Repeater daemon
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=WH_REPEATER_NIM=serit
+WorkingDirectory=/var/lib/wh-repeater
+ExecStart=/usr/local/bin/wh-repeater /etc/wh-repeater/wh-repeater.json
+Restart=on-failure
+RestartSec=2s
+StateDirectory=wh-repeater
+
+[Install]
+WantedBy=multi-user.target

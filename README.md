@@ -34,8 +34,27 @@ Running without a config uses a small default scan plan:
 ./build/wh-repeater
 ```
 
-A future parser will load TOML in the shape shown in
-`config/wh-repeater.example.toml`.
+For the installed daemon, keep the mutable JSON configuration in
+`/etc/wh-repeater/wh-repeater.json` and run it through systemd:
+
+```sh
+sudo install -m 0755 build/wh-repeater /usr/local/bin/wh-repeater
+sudo install -d -m 0755 /etc/wh-repeater /var/www/wh-repeater
+sudo install -m 0644 wh-repeater.json /etc/wh-repeater/wh-repeater.json
+sudo install -m 0644 deploy/systemd/wh-repeater.service /etc/systemd/system/wh-repeater.service
+sudo cp web/index.html web/styles.css web/app.js /var/www/wh-repeater/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wh-repeater.service
+```
+
+The unit runs `/usr/local/bin/wh-repeater /etc/wh-repeater/wh-repeater.json`
+with `WH_REPEATER_NIM=serit`, binds the local REST API on `127.0.0.1:8080`,
+and logs to journald:
+
+```sh
+sudo systemctl status wh-repeater.service
+sudo journalctl -u wh-repeater.service
+```
 
 ## Planned Modules
 

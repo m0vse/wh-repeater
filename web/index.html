@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WH Repeater</title>
+  <link rel="stylesheet" href="/styles.css?v=20260608-rtmp1">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>WH Repeater</h1>
+      <p id="api-state">Connecting</p>
+    </div>
+    <div class="actions">
+      <button id="refresh" type="button">Refresh</button>
+      <button id="save" type="button" class="primary">Save Config</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="status-grid" id="status-grid"></section>
+    <section class="panel tx-panel" id="tx-status-panel"></section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Repeater Config</h2>
+        <span id="save-state"></span>
+      </div>
+
+      <div class="config-sections">
+        <section class="config-section">
+          <h3>Signal Selection</h3>
+          <div class="form-grid compact">
+            <label>
+              Status interval ms
+              <input id="status-interval" type="number" min="100" step="100">
+            </label>
+            <label>
+              Minimum MER dB
+              <input id="minimum-mer" type="number" step="0.1">
+            </label>
+            <label>
+              Minimum D-number dB
+              <input id="minimum-dnumber" type="number" step="0.1">
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <h3>Pluto Output</h3>
+          <div class="form-grid">
+            <label class="check">
+              <input id="pluto-mqtt-enabled" type="checkbox">
+              Pluto MQTT enabled
+            </label>
+            <label>
+              Pluto callsign
+              <input id="pluto-callsign" type="text">
+            </label>
+            <label>
+              Pluto TS address
+              <input id="pluto-address" type="text">
+            </label>
+            <label>
+              Pluto TS port
+              <input id="pluto-port" type="number" min="1" max="65535">
+            </label>
+            <label>
+              Pluto MQTT host
+              <input id="pluto-mqtt-host" type="text">
+            </label>
+            <label>
+              Pluto MQTT port
+              <input id="pluto-mqtt-port" type="number" min="1" max="65535">
+            </label>
+            <label>
+              TX frequency Hz
+              <input id="pluto-tx-frequency" type="number" min="1">
+            </label>
+            <label>
+              Transmit system
+              <select id="pluto-system">
+                <option value="dvbs2">DVB-S2</option>
+                <option value="dvbs">DVB-S</option>
+              </select>
+            </label>
+            <label>
+              TX symbol rate S/s
+              <input id="pluto-symbol-rate" type="number" min="1">
+            </label>
+            <label>
+              TX gain dB
+              <input id="pluto-gain" type="number">
+            </label>
+            <label>
+              NCO Hz
+              <input id="pluto-nco" type="number">
+            </label>
+            <label>
+              Transmit FEC
+              <select id="pluto-fec">
+                <option value="1/2">1/2</option>
+                <option value="1/4">1/4</option>
+                <option value="1/3">1/3</option>
+                <option value="2/5">2/5</option>
+                <option value="3/5">3/5</option>
+                <option value="2/3">2/3</option>
+                <option value="3/4">3/4</option>
+                <option value="4/5">4/5</option>
+                <option value="5/6">5/6</option>
+                <option value="7/8">7/8</option>
+                <option value="8/9">8/9</option>
+                <option value="9/10">9/10</option>
+              </select>
+            </label>
+            <label>
+              Constellation
+              <select id="pluto-constellation">
+                <option value="qpsk">QPSK</option>
+                <option value="8psk">8PSK</option>
+                <option value="16apsk">16APSK</option>
+                <option value="32apsk">32APSK</option>
+              </select>
+            </label>
+            <label>
+              DVB-S2 frame
+              <select id="pluto-frame">
+                <option value="long">Long</option>
+                <option value="short">Short</option>
+              </select>
+            </label>
+            <label>
+              FEC mode
+              <select id="pluto-fec-mode">
+                <option value="fixed">Fixed</option>
+                <option value="variable">Variable</option>
+              </select>
+            </label>
+            <label class="check">
+              <input id="pluto-pilots" type="checkbox">
+              DVB-S2 pilots
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <h3>Media Pipeline</h3>
+          <div class="form-grid">
+            <label>
+              Calculated mux rate kbps
+              <input id="mux-rate" type="number" min="1" readonly>
+            </label>
+            <label>
+              Calculated video bitrate kbps
+              <input id="video-bitrate" type="number" min="1" readonly>
+            </label>
+            <label>
+              Audio bitrate kbps
+              <input id="audio-bitrate" type="number" min="1">
+            </label>
+            <label>
+              Fallback timeout ms
+              <input id="fallback-timeout" type="number" min="0">
+            </label>
+            <label>
+              Static slide fps
+              <input id="fallback-static-fps" type="number" min="1" max="25">
+            </label>
+            <label class="check">
+              <input id="fallback-enabled" type="checkbox">
+              Fallback enabled
+            </label>
+            <label class="wide">
+              Watermark text
+              <input id="watermark-text" type="text">
+            </label>
+            <label class="wide">
+              Fallback still path
+              <input id="fallback-still" type="text" placeholder="/var/lib/wh-repeater/fallback.jpg">
+            </label>
+            <label class="wide">
+              Fallback video paths
+              <input id="fallback-videos" type="text" placeholder="/var/lib/wh-repeater/idle.ts,/var/lib/wh-repeater/ident.mp4">
+            </label>
+            <label class="check">
+              <input id="rtmp-enabled" type="checkbox">
+              RTMP streaming enabled
+            </label>
+            <label class="wide">
+              RTMP URL
+              <input id="rtmp-url" type="text" placeholder="rtmp://server/live/stream-key">
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <h3>Beacon Schedule</h3>
+          <div class="form-grid compact">
+            <label class="check">
+              <input id="beacon-schedule-enabled" type="checkbox">
+              Schedule enabled
+            </label>
+            <label>
+              Start time
+              <input id="beacon-start-time" type="time">
+            </label>
+            <label>
+              End time
+              <input id="beacon-end-time" type="time">
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <h3>Ident</h3>
+          <div class="form-grid compact">
+            <label class="check">
+              <input id="ident-enabled" type="checkbox">
+              Ident enabled
+            </label>
+            <label class="wide">
+              Service name
+              <input id="service-name" type="text">
+            </label>
+            <label>
+              Ident interval seconds
+              <input id="ident-interval" type="number" min="0">
+            </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <h3>SD1 Analogue Input</h3>
+          <div class="form-grid">
+            <label class="check">
+              <input id="sd1-enabled" type="checkbox">
+              SD1 enabled
+            </label>
+            <label>
+              SD1 I2C device
+              <input id="sd1-i2c-device" type="text" value="/dev/i2c-1">
+            </label>
+            <label>
+              SD1 I2C address
+              <input id="sd1-i2c-address" type="number" min="0" max="127" value="64">
+            </label>
+            <label>
+              SD1 receiver ID
+              <input id="sd1-receiver-id" type="number" min="1" value="5">
+            </label>
+            <label>
+              SD1 device ID
+              <input id="sd1-device-id" type="text" value="sd1">
+            </label>
+            <label>
+              SD1 source
+              <select id="sd1-source">
+                <option value="auto">Auto</option>
+                <option value="video1">Video 1</option>
+                <option value="video2">Video 2</option>
+                <option value="video3">Video 3</option>
+                <option value="svideo">S-Video</option>
+                <option value="component">Component</option>
+              </select>
+            </label>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>NIM Scan Plan</h2>
+      </div>
+      <div id="receivers"></div>
+    </section>
+  </main>
+
+  <template id="receiver-template">
+    <article class="receiver">
+      <div class="receiver-head">
+        <strong class="receiver-physical"></strong>
+        <label>
+          RX
+          <input class="receiver-id" type="number" min="1" max="4" readonly>
+        </label>
+        <label class="check">
+          <input class="receiver-enabled" type="checkbox">
+          Enabled
+        </label>
+        <label>
+          Dwell ms
+          <input class="receiver-dwell" type="number" min="100" step="100">
+        </label>
+        <label>
+          Hang ms
+          <input class="receiver-hang" type="number" min="0" step="100">
+        </label>
+        <button class="add-target" type="button">Add Target</button>
+      </div>
+      <div class="targets"></div>
+    </article>
+  </template>
+
+  <template id="target-template">
+    <div class="target">
+      <label>
+        Label
+        <input class="target-label" type="text">
+      </label>
+      <label>
+        Frequency kHz
+        <input class="target-frequency" type="number" min="0">
+      </label>
+      <label>
+        Symbol rate kS
+        <input class="target-symbol-rate" type="number" min="0">
+      </label>
+      <label>
+        LO kHz
+        <input class="target-lo" type="number" min="0">
+      </label>
+      <label>
+        System
+        <select class="target-system">
+          <option value="auto">Auto</option>
+          <option value="dvbs">DVB-S</option>
+          <option value="dvbs2">DVB-S2</option>
+        </select>
+      </label>
+      <label>
+        FEC
+        <select class="target-fec">
+          <option value="auto">Auto</option>
+          <option value="1/4">1/4</option>
+          <option value="1/3">1/3</option>
+          <option value="2/5">2/5</option>
+          <option value="1/2">1/2</option>
+          <option value="3/5">3/5</option>
+          <option value="2/3">2/3</option>
+          <option value="3/4">3/4</option>
+          <option value="4/5">4/5</option>
+          <option value="5/6">5/6</option>
+          <option value="7/8">7/8</option>
+          <option value="8/9">8/9</option>
+          <option value="9/10">9/10</option>
+        </select>
+      </label>
+      <button class="remove-target" type="button">Remove</button>
+    </div>
+  </template>
+
+  <script src="/app.js?v=20260608-rtmp1" defer></script>
+</body>
+</html>

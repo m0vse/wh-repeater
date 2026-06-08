@@ -1,12 +1,16 @@
 #pragma once
 
 #include <chrono>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace whrepeater {
+
+using TransportPacket = std::array<std::byte, 188>;
 
 enum class Antenna {
     top,
@@ -36,6 +40,7 @@ struct ScanTarget {
     std::uint32_t localOscillatorKhz{};
     Antenna antenna{Antenna::top};
     DvbSystem system{DvbSystem::unknown};
+    std::string fec{"auto"};
     std::string label;
 };
 
@@ -56,6 +61,23 @@ struct ReceiverStatus {
     std::uint64_t transportPackets{};
     std::uint64_t continuityErrors{};
     std::chrono::steady_clock::time_point updatedAt{std::chrono::steady_clock::now()};
+};
+
+struct AnalogueStatus {
+    bool enabled{};
+    bool present{};
+    bool ready{};
+    bool locked{};
+    bool cameraRunning{};
+    std::string model;
+    std::string selectedSource;
+    std::string activeSource;
+    std::string firmwareVersion;
+    std::string longVersion;
+    std::string hardwareId;
+    std::uint8_t rawLock{};
+    std::chrono::steady_clock::time_point updatedAt{std::chrono::steady_clock::now()};
+    std::optional<std::string> error;
 };
 
 struct ActiveInput {

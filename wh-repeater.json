@@ -1,0 +1,99 @@
+{
+  "statusIntervalMs": 500,
+  "selection": {
+    "minimumMerDb": 2,
+    "minimumDNumberDb": 0
+  },
+  "pluto": {
+    "address": "230.10.0.1",
+    "port": 1234,
+    "mqttEnabled": true,
+    "mqttHost": "192.168.2.1",
+    "mqttPort": 1883,
+    "callsign": "GB3GV",
+    "system": "dvbs",
+    "txFrequencyHz": 13185000,
+    "symbolRateS": 4000000,
+    "txGainDb": -40,
+    "ncoHz": 0,
+    "pilots": false,
+    "frame": "long",
+    "fecMode": "fixed",
+    "constellation": "qpsk",
+    "muxRateKbps": 3686,
+    "videoBitrateKbps": 3590,
+    "audioBitrateKbps": 96,
+    "fec": "1/2",
+    "watermarkText": "GB3GV"
+  },
+  "fallback": {
+    "enabled": true,
+    "stillPath": "",
+    "staticFrameRate": 2,
+    "inputTimeoutMs": 1500,
+    "videoPaths": []
+  },
+  "streaming": {
+    "rtmp": {
+      "enabled": false,
+      "url": ""
+    }
+  },
+  "beaconSchedule": {
+    "enabled": true,
+    "startTime": "09:00",
+    "endTime": "23:00"
+  },
+  "ident": {
+    "enabled": true,
+    "serviceName": "GB3GV",
+    "intervalSeconds": 600
+  },
+  "analogue": {
+    "sd1": {
+      "enabled": true,
+      "receiverId": 5,
+      "deviceId": "sd1",
+      "i2cDevice": "/dev/i2c-1",
+      "i2cAddress": 64,
+      "source": "auto"
+    }
+  },
+  "receivers": [
+    {
+      "id": 1,
+      "enabled": true,
+      "dwellMs": 1500,
+      "hangMs": 5000,
+      "targets": [
+        {"frequencyKhz":1249000,"symbolRateKs":4000,"localOscillatorKhz":0,"antenna":"top","system":"auto","fec":"auto","label":"23cm 4MS"},
+        {"frequencyKhz":1249000,"symbolRateKs":2000,"localOscillatorKhz":0,"antenna":"top","system":"auto","fec":"auto","label":"23cm 2MS"}
+      ]
+    },
+    {
+      "id": 2,
+      "enabled": true,
+      "dwellMs": 1500,
+      "hangMs": 5000,
+      "targets": [
+        {"frequencyKhz":437000,"symbolRateKs":2000,"localOscillatorKhz":0,"antenna":"bottom","system":"auto","fec":"auto","label":"70cm 2MS"}
+      ]
+    },
+    {
+      "id": 3,
+      "enabled": true,
+      "dwellMs": 1500,
+      "hangMs": 5000,
+      "targets": [
+        {"frequencyKhz":146000,"symbolRateKs":333,"localOscillatorKhz":0,"antenna":"top","system":"auto","fec":"auto","label":"2m 333kS"}
+      ]
+    },
+    {
+      "id": 4,
+      "enabled": true,
+      "dwellMs": 1500,
+      "hangMs": 5000,
+      "targets": []
+    }
+  ]
+}

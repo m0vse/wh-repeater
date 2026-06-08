@@ -1,0 +1,727 @@
+const state = {
+  config: null,
+  status: null,
+  dirty: false,
+  sd1EnabledOverride: null,
+};
+
+const el = {
+  apiState: document.querySelector("#api-state"),
+  saveState: document.querySelector("#save-state"),
+  statusGrid: document.querySelector("#status-grid"),
+  txStatusPanel: document.querySelector("#tx-status-panel"),
+  receivers: document.querySelector("#receivers"),
+  refresh: document.querySelector("#refresh"),
+  save: document.querySelector("#save"),
+  addReceiver: document.querySelector("#add-receiver"),
+  statusInterval: document.querySelector("#status-interval"),
+  minimumMer: document.querySelector("#minimum-mer"),
+  minimumDNumber: document.querySelector("#minimum-dnumber"),
+  plutoAddress: document.querySelector("#pluto-address"),
+  plutoPort: document.querySelector("#pluto-port"),
+  plutoMqttEnabled: document.querySelector("#pluto-mqtt-enabled"),
+  plutoMqttHost: document.querySelector("#pluto-mqtt-host"),
+  plutoMqttPort: document.querySelector("#pluto-mqtt-port"),
+  plutoCallsign: document.querySelector("#pluto-callsign"),
+  plutoSystem: document.querySelector("#pluto-system"),
+  plutoTxFrequency: document.querySelector("#pluto-tx-frequency"),
+  plutoSymbolRate: document.querySelector("#pluto-symbol-rate"),
+  plutoGain: document.querySelector("#pluto-gain"),
+  plutoNco: document.querySelector("#pluto-nco"),
+  plutoPilots: document.querySelector("#pluto-pilots"),
+  plutoFrame: document.querySelector("#pluto-frame"),
+  plutoFecMode: document.querySelector("#pluto-fec-mode"),
+  plutoConstellation: document.querySelector("#pluto-constellation"),
+  muxRate: document.querySelector("#mux-rate"),
+  videoBitrate: document.querySelector("#video-bitrate"),
+  audioBitrate: document.querySelector("#audio-bitrate"),
+  plutoFec: document.querySelector("#pluto-fec"),
+  watermarkText: document.querySelector("#watermark-text"),
+  fallbackEnabled: document.querySelector("#fallback-enabled"),
+  fallbackTimeout: document.querySelector("#fallback-timeout"),
+  fallbackStaticFps: document.querySelector("#fallback-static-fps"),
+  fallbackStill: document.querySelector("#fallback-still"),
+  fallbackVideos: document.querySelector("#fallback-videos"),
+  rtmpEnabled: document.querySelector("#rtmp-enabled"),
+  rtmpUrl: document.querySelector("#rtmp-url"),
+  beaconScheduleEnabled: document.querySelector("#beacon-schedule-enabled"),
+  beaconStartTime: document.querySelector("#beacon-start-time"),
+  beaconEndTime: document.querySelector("#beacon-end-time"),
+  sd1Enabled: document.querySelector("#sd1-enabled"),
+  sd1ReceiverId: document.querySelector("#sd1-receiver-id"),
+  sd1DeviceId: document.querySelector("#sd1-device-id"),
+  sd1I2cDevice: document.querySelector("#sd1-i2c-device"),
+  sd1I2cAddress: document.querySelector("#sd1-i2c-address"),
+  sd1Source: document.querySelector("#sd1-source"),
+  identEnabled: document.querySelector("#ident-enabled"),
+  serviceName: document.querySelector("#service-name"),
+  identInterval: document.querySelector("#ident-interval"),
+  receiverTemplate: document.querySelector("#receiver-template"),
+  targetTemplate: document.querySelector("#target-template"),
+};
+
+function setMessage(message, ok = true) {
+  el.apiState.textContent = message;
+  el.apiState.style.color = ok ? "#647080" : "#b3261e";
+}
+
+function setSaveMessage(message, ok = true) {
+  el.saveState.textContent = message;
+  el.saveState.style.color = ok ? "#647080" : "#b3261e";
+}
+
+function numberValue(input, fallback = 0) {
+  const value = Number(input.value);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function formatValue(value, suffix = "") {
+  return value === null || value === undefined ? "-" : `${value}${suffix}`;
+}
+
+function fixedReceiverAntenna(receiverId) {
+  return receiverId === 1 || receiverId === 3 ? "top" : "bottom";
+}
+
+function receiverNim(receiverId) {
+  return receiverId <= 2 ? "A" : "B";
+}
+
+function receiverTuner(receiverId) {
+  return receiverId === 1 || receiverId === 3 ? 1 : 2;
+}
+
+function receiverHardwareLabel(receiver) {
+  if (receiver.type === "analogue") {
+    return receiver.deviceId || "sd1";
+  }
+  return `NIM ${receiver.nim || receiverNim(receiver.id)} ${receiver.antenna || fixedReceiverAntenna(receiver.id)} antenna`;
+}
+
+function stateBadge(status) {
+  const locked = status === "lockedDvbs" || status === "lockedDvbs2" || status === "lockedAnalogue";
+  return `<span class="badge ${locked ? "locked" : ""}">${status || "idle"}</span>`;
+}
+
+function sd1Placeholder() {
+  const sd1 = state.config?.analogue?.sd1 || {};
+  const analogue = state.status?.analogue || {};
+  return {
+    id: sd1.receiverId ?? 5,
+    name: "SD1",
+    type: "analogue",
+    deviceId: sd1.deviceId ?? "sd1",
+    state: analogue.present ? "idle" : "fault",
+    present: Boolean(analogue.present),
+    ready: Boolean(analogue.ready),
+    locked: Boolean(analogue.locked),
+    cameraRunning: Boolean(analogue.cameraRunning),
+    source: analogue.activeSource || analogue.selectedSource || "",
+    firmwareVersion: analogue.firmwareVersion || "",
+    hardwareId: analogue.hardwareId || "",
+    rawLock: analogue.rawLock ?? 0,
+    error: analogue.error || "Waiting for SD1 status",
+  };
+}
+
+function renderStatus() {
+  const sd1Enabled = state.sd1EnabledOverride
+    ?? state.status?.analogue?.enabled
+    ?? state.config?.analogue?.sd1?.enabled
+    ?? false;
+  const statuses = (state.status?.receivers || []).filter((receiver) => receiver.type !== "analogue" || sd1Enabled);
+  if (sd1Enabled && !statuses.some((receiver) => receiver.type === "analogue")) {
+    statuses.push(sd1Placeholder());
+  }
+  const activeReceiver = state.status?.activeReceiver;
+
+  el.statusGrid.innerHTML = "";
+  for (const receiver of statuses) {
+    const card = document.createElement("article");
+    card.className = `status-card ${receiver.id === activeReceiver ? "active" : ""}`;
+    const target = receiver.target;
+    const title = receiver.name || `RX${receiver.id}`;
+    const isAnalogue = receiver.type === "analogue";
+    const targetText = target ? `${target.frequencyKhz} kHz / ${target.symbolRateKs} kS` : "-";
+    if (isAnalogue) {
+      card.innerHTML = `
+        <div class="status-title">
+          <h2>${title}</h2>
+          ${stateBadge(receiver.state)}
+        </div>
+        <dl>
+          <dt>Detected</dt>
+          <dd>${receiver.present ? "yes" : "no"}</dd>
+          <dt>Ready</dt>
+          <dd>${receiver.ready ? "yes" : "no"}</dd>
+          <dt>Locked</dt>
+          <dd>${receiver.locked ? "yes" : "no"}</dd>
+          <dt>Raw lock</dt>
+          <dd>${receiver.rawLock ?? "-"}</dd>
+          <dt>Source</dt>
+          <dd>${receiver.source || receiver.serviceName || "-"}</dd>
+          <dt>CSI active</dt>
+          <dd>${receiver.cameraRunning ? "yes" : "no"}</dd>
+          <dt>Version</dt>
+          <dd>${receiver.firmwareVersion || "-"}</dd>
+          <dt>Device ID</dt>
+          <dd>${receiver.deviceId || "-"}</dd>
+          <dt>Hardware ID</dt>
+          <dd>${receiver.hardwareId || "-"}</dd>
+          <dt>Error</dt>
+          <dd>${receiver.error || "-"}</dd>
+        </dl>
+      `;
+      el.statusGrid.appendChild(card);
+      continue;
+    }
+
+    card.innerHTML = `
+      <div class="status-title">
+        <h2>${title}</h2>
+        ${stateBadge(receiver.state)}
+      </div>
+      <dl>
+        <dt>${receiver.type === "analogue" ? "Source" : "Target"}</dt>
+        <dd>${targetText}</dd>
+        <dt>Hardware</dt>
+        <dd>${receiverHardwareLabel(receiver)}</dd>
+        <dt>FEC</dt>
+        <dd>${target?.fec || "-"}</dd>
+        <dt>MER</dt>
+        <dd>${formatValue(receiver.merDb, " dB")}</dd>
+        <dt>D-number</dt>
+        <dd>${formatValue(receiver.dNumberDb, " dB")}</dd>
+        <dt>TS packets</dt>
+        <dd>${receiver.transportPackets ?? 0}</dd>
+        <dt>CC errors</dt>
+        <dd>${receiver.continuityErrors ?? 0}</dd>
+      </dl>
+    `;
+    el.statusGrid.appendChild(card);
+  }
+
+  if (statuses.length === 0) {
+    el.statusGrid.innerHTML = `<section class="panel">No receiver status yet.</section>`;
+  }
+  renderTxStatus();
+}
+
+function appendStatusRow(list, label, value) {
+  const dt = document.createElement("dt");
+  dt.textContent = label;
+  const dd = document.createElement("dd");
+  dd.textContent = value === null || value === undefined || value === "" ? "-" : String(value);
+  list.appendChild(dt);
+  list.appendChild(dd);
+}
+
+function txValue(values, key) {
+  return values?.[key] ?? null;
+}
+
+function fecFraction(fec) {
+  const [numerator, denominator] = String(fec || "1/2").split("/").map(Number);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || numerator <= 0 || denominator <= 0) {
+    return [1, 2];
+  }
+  return [numerator, denominator];
+}
+
+function constellationBits(system, constellation) {
+  if (system === "dvbs") {
+    return 2;
+  }
+  return {
+    qpsk: 2,
+    "8psk": 3,
+    "16apsk": 4,
+    "32apsk": 5,
+  }[constellation] ?? 2;
+}
+
+function calculatePlutoMuxRate() {
+  return calculatePlutoMuxRateFromConfig({
+    symbolRateS: numberValue(el.plutoSymbolRate, 333000),
+    fec: el.plutoFec.value,
+    system: el.plutoSystem.value,
+    constellation: el.plutoConstellation.value,
+  });
+}
+
+function calculatePlutoMuxRateFromConfig(pluto) {
+  const symbolRate = Number(pluto?.symbolRateS ?? 333000);
+  const [fecNumerator, fecDenominator] = fecFraction(pluto?.fec ?? "1/2");
+  const bits = constellationBits(pluto?.system ?? "dvbs2", pluto?.constellation ?? "qpsk");
+  let numerator = symbolRate * bits * fecNumerator;
+  let denominator = fecDenominator;
+  if (pluto?.system === "dvbs") {
+    numerator *= 188;
+    denominator *= 204;
+  }
+  return Math.floor(Math.floor(numerator / denominator) / 1000);
+}
+
+function updateCalculatedMediaRates() {
+  const muxRate = calculatePlutoMuxRate();
+  const audioRate = numberValue(el.audioBitrate, 96);
+  el.muxRate.value = muxRate;
+  el.videoBitrate.value = Math.max(1, muxRate - audioRate);
+}
+
+function renderTxStatus() {
+  const pluto = state.status?.pluto;
+  el.txStatusPanel.innerHTML = "";
+
+  const head = document.createElement("div");
+  head.className = "panel-head";
+  const title = document.createElement("h2");
+  title.textContent = "TX Status";
+  const badge = document.createElement("span");
+  badge.className = `badge ${pluto?.connected ? "locked" : ""}`;
+  badge.textContent = pluto?.connected ? "connected" : "disconnected";
+  head.appendChild(title);
+  head.appendChild(badge);
+  el.txStatusPanel.appendChild(head);
+
+  const values = pluto?.values || {};
+  const list = document.createElement("dl");
+  list.className = "tx-status-grid";
+  appendStatusRow(list, "MQTT", pluto?.enabled === false ? "disabled" : `${pluto?.host || "-"}:${pluto?.port || "-"}`);
+  appendStatusRow(list, "Callsign", pluto?.callsign);
+  appendStatusRow(list, "Frequency", txValue(values, "tx/frequency"));
+  appendStatusRow(list, "Gain", txValue(values, "tx/gain"));
+  appendStatusRow(list, "Mute", txValue(values, "tx/mute"));
+  appendStatusRow(list, "Stream mode", txValue(values, "tx/stream/mode"));
+  appendStatusRow(list, "Symbol rate", txValue(values, "tx/dvbs2/sr"));
+  appendStatusRow(list, "FEC", txValue(values, "tx/dvbs2/fec") || txValue(values, "tx/dvbs2/ts/fecvariable"));
+  appendStatusRow(list, "TS bitrate", txValue(values, "tx/dvbs2/ts/bitrate"));
+  appendStatusRow(list, "Queue", txValue(values, "tx/dvbs2/queue"));
+  appendStatusRow(list, "Version", txValue(values, "system/version"));
+  appendStatusRow(list, "Beacon schedule", state.status?.beaconSchedule?.enabled
+    ? `${state.status.beaconSchedule.active ? "active" : "inactive"} ${state.status.beaconSchedule.startTime}-${state.status.beaconSchedule.endTime}`
+    : "disabled");
+  appendStatusRow(list, "Updated", pluto ? `${pluto.updatedMsAgo ?? 0} ms ago` : null);
+  appendStatusRow(list, "Error", pluto?.error);
+  el.txStatusPanel.appendChild(list);
+}
+
+function fillConfigForm() {
+  const config = state.config;
+  if (!config) {
+    return;
+  }
+
+  el.statusInterval.value = config.statusIntervalMs ?? 500;
+  el.minimumMer.value = config.selection?.minimumMerDb ?? 2;
+  el.minimumDNumber.value = config.selection?.minimumDNumberDb ?? 0;
+  el.plutoAddress.value = config.pluto?.address ?? "230.10.0.1";
+  el.plutoPort.value = config.pluto?.port ?? 1234;
+  el.plutoMqttEnabled.checked = config.pluto?.mqttEnabled ?? true;
+  el.plutoMqttHost.value = config.pluto?.mqttHost ?? "192.168.2.1";
+  el.plutoMqttPort.value = config.pluto?.mqttPort ?? 1883;
+  el.plutoCallsign.value = config.pluto?.callsign ?? "GB3GV";
+  el.plutoSystem.value = config.pluto?.system ?? "dvbs2";
+  el.plutoTxFrequency.value = config.pluto?.txFrequencyHz ?? 2400000000;
+  el.plutoSymbolRate.value = config.pluto?.symbolRateS ?? 333000;
+  el.plutoGain.value = config.pluto?.txGainDb ?? -40;
+  el.plutoNco.value = config.pluto?.ncoHz ?? 0;
+  el.plutoPilots.checked = Boolean(config.pluto?.pilots);
+  el.plutoFrame.value = config.pluto?.frame ?? "long";
+  el.plutoFecMode.value = config.pluto?.fecMode ?? "fixed";
+  el.plutoConstellation.value = config.pluto?.constellation ?? "qpsk";
+  el.muxRate.value = config.pluto?.muxRateKbps ?? 1200;
+  el.videoBitrate.value = config.pluto?.videoBitrateKbps ?? 900;
+  el.audioBitrate.value = config.pluto?.audioBitrateKbps ?? 96;
+  el.plutoFec.value = config.pluto?.fec ?? "1/2";
+  el.watermarkText.value = config.pluto?.watermarkText ?? "WH Repeater";
+  el.fallbackEnabled.checked = config.fallback?.enabled ?? true;
+  el.fallbackTimeout.value = config.fallback?.inputTimeoutMs ?? 1500;
+  el.fallbackStaticFps.value = config.fallback?.staticFrameRate ?? 2;
+  el.fallbackStill.value = config.fallback?.stillPath ?? "";
+  el.fallbackVideos.value = (config.fallback?.videoPaths ?? []).join(",");
+  el.rtmpEnabled.checked = Boolean(config.streaming?.rtmp?.enabled);
+  el.rtmpUrl.value = config.streaming?.rtmp?.url ?? "";
+  el.beaconScheduleEnabled.checked = Boolean(config.beaconSchedule?.enabled);
+  el.beaconStartTime.value = config.beaconSchedule?.startTime ?? "09:00";
+  el.beaconEndTime.value = config.beaconSchedule?.endTime ?? "23:00";
+  el.sd1Enabled.checked = config.analogue?.sd1?.enabled ?? true;
+  el.sd1ReceiverId.value = config.analogue?.sd1?.receiverId ?? 5;
+  el.sd1DeviceId.value = config.analogue?.sd1?.deviceId ?? "sd1";
+  el.sd1I2cDevice.value = config.analogue?.sd1?.i2cDevice ?? "/dev/i2c-1";
+  el.sd1I2cAddress.value = config.analogue?.sd1?.i2cAddress ?? 64;
+  el.sd1Source.value = config.analogue?.sd1?.source ?? "auto";
+  el.identEnabled.checked = Boolean(config.ident?.enabled);
+  el.serviceName.value = config.ident?.serviceName ?? "WH Repeater";
+  el.identInterval.value = config.ident?.intervalSeconds ?? 600;
+
+  el.receivers.innerHTML = "";
+  for (const receiver of config.receivers || []) {
+    el.receivers.appendChild(receiverNode(receiver));
+  }
+  updatePlutoSystemFields();
+  updateCalculatedMediaRates();
+}
+
+function receiverNode(receiver) {
+  const node = el.receiverTemplate.content.firstElementChild.cloneNode(true);
+  node.querySelector(".receiver-id").value = receiver.id;
+  node.querySelector(".receiver-enabled").checked = Boolean(receiver.enabled);
+  node.querySelector(".receiver-dwell").value = receiver.dwellMs ?? 1500;
+  node.querySelector(".receiver-hang").value = receiver.hangMs ?? 5000;
+  node.querySelector(".receiver-physical").textContent =
+    `NIM ${receiverNim(receiver.id)} ${fixedReceiverAntenna(receiver.id)} antenna`;
+
+  const targetList = node.querySelector(".targets");
+  for (const target of receiver.targets || []) {
+    targetList.appendChild(targetNode(target));
+  }
+  if ((receiver.targets || []).length === 0) {
+    targetList.appendChild(emptyTargetMessage());
+  }
+
+  node.querySelector(".add-target").addEventListener("click", () => {
+    const empty = targetList.querySelector(".empty");
+    if (empty) {
+      empty.remove();
+    }
+    targetList.appendChild(targetNode({
+      frequencyKhz: 10491500,
+      symbolRateKs: 1500,
+      localOscillatorKhz: 9750000,
+      antenna: fixedReceiverAntenna(receiver.id),
+      system: "auto",
+      fec: "auto",
+      label: "",
+    }));
+    markDirty();
+  });
+
+  node.addEventListener("input", markDirty);
+  node.addEventListener("change", markDirty);
+  return node;
+}
+
+function emptyTargetMessage() {
+  const item = document.createElement("div");
+  item.className = "empty";
+  item.textContent = "No scan targets configured.";
+  return item;
+}
+
+function targetNode(target) {
+  const node = el.targetTemplate.content.firstElementChild.cloneNode(true);
+  node.querySelector(".target-label").value = target.label ?? "";
+  node.querySelector(".target-frequency").value = target.frequencyKhz ?? 0;
+  node.querySelector(".target-symbol-rate").value = target.symbolRateKs ?? 0;
+  node.querySelector(".target-lo").value = target.localOscillatorKhz ?? 9750000;
+  node.querySelector(".target-system").value = target.system ?? "auto";
+  node.querySelector(".target-fec").value = target.fec ?? "auto";
+  node.querySelector(".remove-target").addEventListener("click", () => {
+    const parent = node.parentElement;
+    node.remove();
+    if (parent && parent.querySelectorAll(".target").length === 0) {
+      parent.appendChild(emptyTargetMessage());
+    }
+    markDirty();
+  });
+  return node;
+}
+
+function readConfigForm() {
+  updateCalculatedMediaRates();
+  const receivers = [...el.receivers.querySelectorAll(".receiver")].map((receiver) => ({
+    id: numberValue(receiver.querySelector(".receiver-id"), 1),
+    enabled: receiver.querySelector(".receiver-enabled").checked,
+    dwellMs: numberValue(receiver.querySelector(".receiver-dwell"), 1500),
+    hangMs: numberValue(receiver.querySelector(".receiver-hang"), 5000),
+    targets: [...receiver.querySelectorAll(".target")].map((target) => ({
+      label: target.querySelector(".target-label").value,
+      frequencyKhz: numberValue(target.querySelector(".target-frequency")),
+      symbolRateKs: numberValue(target.querySelector(".target-symbol-rate")),
+      localOscillatorKhz: numberValue(target.querySelector(".target-lo"), 9750000),
+      antenna: fixedReceiverAntenna(numberValue(receiver.querySelector(".receiver-id"), 1)),
+      system: target.querySelector(".target-system").value,
+      fec: target.querySelector(".target-fec").value,
+    })),
+  }));
+
+  return {
+    statusIntervalMs: numberValue(el.statusInterval, 500),
+    selection: {
+      minimumMerDb: numberValue(el.minimumMer, 2),
+      minimumDNumberDb: numberValue(el.minimumDNumber, 0),
+    },
+    pluto: {
+      address: el.plutoAddress.value,
+      port: numberValue(el.plutoPort, 1234),
+      mqttEnabled: el.plutoMqttEnabled.checked,
+      mqttHost: el.plutoMqttHost.value || "192.168.2.1",
+      mqttPort: numberValue(el.plutoMqttPort, 1883),
+      callsign: el.plutoCallsign.value || "GB3GV",
+      system: el.plutoSystem.value,
+      txFrequencyHz: numberValue(el.plutoTxFrequency, 2400000000),
+      symbolRateS: numberValue(el.plutoSymbolRate, 333000),
+      txGainDb: numberValue(el.plutoGain, -40),
+      ncoHz: numberValue(el.plutoNco, 0),
+      pilots: el.plutoPilots.checked,
+      frame: el.plutoFrame.value,
+      fecMode: el.plutoFecMode.value,
+      constellation: el.plutoConstellation.value,
+      muxRateKbps: numberValue(el.muxRate, 1200),
+      videoBitrateKbps: numberValue(el.videoBitrate, 900),
+      audioBitrateKbps: numberValue(el.audioBitrate, 96),
+      fec: el.plutoFec.value,
+      watermarkText: el.watermarkText.value,
+    },
+    fallback: {
+      enabled: el.fallbackEnabled.checked,
+      inputTimeoutMs: numberValue(el.fallbackTimeout, 1500),
+      staticFrameRate: Math.min(25, Math.max(1, numberValue(el.fallbackStaticFps, 2))),
+      stillPath: el.fallbackStill.value,
+      videoPaths: el.fallbackVideos.value.split(",").map((value) => value.trim()).filter(Boolean),
+    },
+    streaming: {
+      rtmp: {
+        enabled: el.rtmpEnabled.checked,
+        url: el.rtmpUrl.value.trim(),
+      },
+    },
+    beaconSchedule: {
+      enabled: el.beaconScheduleEnabled.checked,
+      startTime: el.beaconStartTime.value || "09:00",
+      endTime: el.beaconEndTime.value || "23:00",
+    },
+    analogue: {
+      sd1: {
+        enabled: el.sd1Enabled.checked,
+        receiverId: numberValue(el.sd1ReceiverId, 5),
+        deviceId: el.sd1DeviceId.value || "sd1",
+        i2cDevice: el.sd1I2cDevice.value || "/dev/i2c-1",
+        i2cAddress: numberValue(el.sd1I2cAddress, 64),
+        source: el.sd1Source.value,
+      },
+    },
+    ident: {
+      enabled: el.identEnabled.checked,
+      serviceName: el.serviceName.value,
+      intervalSeconds: numberValue(el.identInterval, 600),
+    },
+    receivers,
+  };
+}
+
+function updatePlutoSystemFields() {
+  const s2Only = [
+    el.plutoPilots,
+    el.plutoFrame,
+    el.plutoFecMode,
+    el.plutoConstellation,
+  ];
+  const dvbs = el.plutoSystem.value === "dvbs";
+  for (const input of s2Only) {
+    input.disabled = dvbs;
+    const label = input.closest("label");
+    if (label) {
+      label.classList.toggle("disabled", dvbs);
+    }
+  }
+  updateCalculatedMediaRates();
+}
+
+function markDirty() {
+  state.dirty = true;
+  setSaveMessage("Unsaved changes");
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function canonicalConfig(value) {
+  if (Array.isArray(value)) {
+    return value.map(canonicalConfig);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, canonicalConfig(value[key])]),
+    );
+  }
+  return value;
+}
+
+function comparableConfig(config) {
+  const copy = structuredClone(config);
+  if (copy.pluto) {
+    copy.pluto.muxRateKbps = calculatePlutoMuxRateFromConfig(copy.pluto);
+    copy.pluto.videoBitrateKbps = Math.max(1, copy.pluto.muxRateKbps - Number(copy.pluto.audioBitrateKbps ?? 96));
+  }
+  for (const receiver of copy.receivers || []) {
+    for (const target of receiver.targets || []) {
+      target.antenna = fixedReceiverAntenna(receiver.id);
+    }
+  }
+  return canonicalConfig(copy);
+}
+
+function configMatches(left, right) {
+  return JSON.stringify(comparableConfig(left)) === JSON.stringify(comparableConfig(right));
+}
+
+async function loadStatus() {
+  const response = await fetch("/api/status", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`status ${response.status}`);
+  }
+  state.status = await response.json();
+  renderStatus();
+}
+
+async function loadConfig() {
+  const response = await fetch("/api/config", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`config ${response.status}`);
+  }
+  state.config = await response.json();
+  if (!state.dirty) {
+    fillConfigForm();
+  }
+}
+
+async function fetchConfig() {
+  const response = await fetch("/api/config", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`config ${response.status}`);
+  }
+  return response.json();
+}
+
+async function fetchAppliedConfig(expected) {
+  let latest = null;
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    await delay(250);
+    latest = await fetchConfig();
+    if (configMatches(latest, expected)) {
+      return latest;
+    }
+  }
+  return null;
+}
+
+async function refreshAll() {
+  try {
+    await Promise.all([loadStatus(), loadConfig()]);
+    setMessage("Connected");
+  } catch (error) {
+    setMessage(`API unavailable: ${error.message}`, false);
+  }
+}
+
+async function saveConfig() {
+  const config = readConfigForm();
+  setSaveMessage("Saving");
+  const response = await fetch("/api/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
+  state.config = config;
+  state.sd1EnabledOverride = config.analogue?.sd1?.enabled ?? null;
+  state.dirty = false;
+  fillConfigForm();
+  renderStatus();
+  setSaveMessage("Saved, applying");
+
+  const applied = await fetchAppliedConfig(config);
+  if (applied) {
+    state.config = applied;
+    state.sd1EnabledOverride = null;
+    fillConfigForm();
+    setSaveMessage("Saved");
+  } else {
+    setSaveMessage("Saved");
+  }
+  await loadStatus();
+  setMessage("Connected");
+}
+
+el.refresh.addEventListener("click", refreshAll);
+el.save.addEventListener("click", () => {
+  saveConfig().catch((error) => setSaveMessage(`Save failed: ${error.message}`, false));
+});
+if (el.addReceiver) {
+  el.addReceiver.addEventListener("click", () => {
+    const nextId = el.receivers.querySelectorAll(".receiver").length + 1;
+    el.receivers.appendChild(receiverNode({ id: nextId, enabled: true, dwellMs: 1500, hangMs: 5000, targets: [] }));
+    markDirty();
+  });
+}
+
+for (const input of [
+  el.statusInterval,
+  el.minimumMer,
+  el.minimumDNumber,
+  el.plutoAddress,
+  el.plutoPort,
+  el.plutoMqttEnabled,
+  el.plutoMqttHost,
+  el.plutoMqttPort,
+  el.plutoCallsign,
+  el.plutoSystem,
+  el.plutoTxFrequency,
+  el.plutoSymbolRate,
+  el.plutoGain,
+  el.plutoNco,
+  el.plutoPilots,
+  el.plutoFrame,
+  el.plutoFecMode,
+  el.plutoConstellation,
+  el.audioBitrate,
+  el.plutoFec,
+  el.watermarkText,
+  el.fallbackEnabled,
+  el.fallbackTimeout,
+  el.fallbackStaticFps,
+  el.fallbackStill,
+  el.fallbackVideos,
+  el.rtmpEnabled,
+  el.rtmpUrl,
+  el.beaconScheduleEnabled,
+  el.beaconStartTime,
+  el.beaconEndTime,
+  el.sd1Enabled,
+  el.sd1ReceiverId,
+  el.sd1DeviceId,
+  el.sd1I2cDevice,
+  el.sd1I2cAddress,
+  el.sd1Source,
+  el.identEnabled,
+  el.serviceName,
+  el.identInterval,
+]) {
+  input.addEventListener("input", () => {
+    if (input === el.muxRate) {
+      updateCalculatedMediaRates();
+    }
+    if (input === el.plutoSymbolRate || input === el.audioBitrate) {
+      updateCalculatedMediaRates();
+    }
+    markDirty();
+  });
+  input.addEventListener("change", () => {
+    if (input === el.plutoSystem) {
+      updatePlutoSystemFields();
+    }
+    if (input === el.plutoFec || input === el.plutoConstellation) {
+      updateCalculatedMediaRates();
+    }
+    markDirty();
+  });
+}
+
+refreshAll();
+setInterval(loadStatus, 2000);
