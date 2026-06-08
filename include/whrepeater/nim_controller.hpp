@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Declares the receiver hardware abstraction for the Serit NIMs, STV0910 demodulators, STV6120 tuners, PIC control, and whdriver packet access.
+ *    Declares the receiver hardware abstraction for the Serit NIMs, STV0910
+ *    demodulators, STV6120 tuners, PIC control, and whdriver packet access.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

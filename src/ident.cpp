@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Implements the minimal ident timer helper used while full transport-stream service-ident insertion remains a future expansion point.
+ *    Implements the minimal ident timer helper used while full transport-
+ *    stream service-ident insertion remains a future expansion point.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

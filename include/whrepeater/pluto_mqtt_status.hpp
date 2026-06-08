@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Declares the MQTT status client used to monitor Pluto/F5OEO transmit state and expose it to the management API and web UI.
+ *    Declares the MQTT status client used to monitor Pluto/F5OEO transmit
+ *    state and expose it to the management API and web UI.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

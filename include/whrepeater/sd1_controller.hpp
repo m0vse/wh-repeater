@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Declares direct PiVideo/I2C status polling for the Lintest Systems SD1 analogue capture board and exposes it as receiver RX5.
+ *    Declares direct PiVideo/I2C status polling for the Lintest Systems SD1
+ *    analogue capture board and exposes it as receiver RX5.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

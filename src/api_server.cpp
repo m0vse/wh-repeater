@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Implements the localhost HTTP/JSON API for health, status snapshots, configuration retrieval, and configuration updates from the web UI.
+ *    Implements the localhost HTTP/JSON API for health, status snapshots,
+ *    configuration retrieval, and configuration updates from the web UI.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

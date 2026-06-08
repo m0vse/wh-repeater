@@ -5,7 +5,9 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Implements the browser-side management UI, status polling, receiver/SD1/TX rendering, configuration editing, dirty-state handling, and API calls.
+ *    Implements the browser-side management UI, status polling,
+ *    receiver/SD1/TX rendering, configuration editing, dirty-state
+ *    handling, and API calls.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

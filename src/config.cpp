@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Implements JSON parsing, validation, serialization, defaults, scan-target handling, and derived Pluto mux/video bitrate calculations.
+ *    Implements JSON parsing, validation, serialization, defaults, scan-
+ *    target handling, and derived Pluto mux/video bitrate calculations.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

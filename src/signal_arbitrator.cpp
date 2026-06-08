@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Chooses the active receiver from current status snapshots using lock state, MER, D-number, configured thresholds, and receiver ordering.
+ *    Chooses the active receiver from current status snapshots using lock
+ *    state, MER, D-number, configured thresholds, and receiver ordering.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

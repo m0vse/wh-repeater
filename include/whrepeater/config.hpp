@@ -5,7 +5,9 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Defines the JSON-backed repeater configuration structures, default values, load/save helpers, and derived Pluto mux/video bitrate calculations.
+ *    Defines the JSON-backed repeater configuration structures, default
+ *    values, load/save helpers, and derived Pluto mux/video bitrate
+ *    calculations.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

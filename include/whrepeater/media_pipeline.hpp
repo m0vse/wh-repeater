@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Declares the generated MPEG-TS media pipeline, fallback/status slate generation, optional RTMP forwarding, and video state notifications.
+ *    Declares the generated MPEG-TS media pipeline, fallback/status slate
+ *    generation, optional RTMP forwarding, and video state notifications.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

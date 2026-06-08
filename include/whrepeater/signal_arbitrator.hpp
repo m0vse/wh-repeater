@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Declares the active-input selector that chooses the receiver allowed to drive the output path based on lock state and quality thresholds.
+ *    Declares the active-input selector that chooses the receiver allowed
+ *    to drive the output path based on lock state and quality thresholds.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

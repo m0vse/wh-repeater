@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Implements aligned MPEG-TS packet routing from the selected input path toward the configured Pluto sink.
+ *    Implements aligned MPEG-TS packet routing from the selected input path
+ *    toward the configured Pluto sink.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

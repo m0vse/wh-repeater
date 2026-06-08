@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Loads configuration, selects the requested config path, constructs the daemon, and reports top-level startup/runtime failures.
+ *    Loads configuration, selects the requested config path, constructs the
+ *    daemon, and reports top-level startup/runtime failures.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

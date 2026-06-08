@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Implements MQTT connection, subscription, parsing, and snapshot reporting for Pluto/F5OEO transmit status topics.
+ *    Implements MQTT connection, subscription, parsing, and snapshot
+ *    reporting for Pluto/F5OEO transmit status topics.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

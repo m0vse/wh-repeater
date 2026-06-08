@@ -5,7 +5,9 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Contains the STV0910 register/value table used by the Serit NIM controller when bringing the demodulators into a known operating state.
+ *    Contains the STV0910 register/value table used by the Serit NIM
+ *    controller when bringing the demodulators into a known operating
+ *    state.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

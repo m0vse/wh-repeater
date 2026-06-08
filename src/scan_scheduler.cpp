@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Implements scan target rotation, retune dwell timing, lock hold behaviour, and hang-time state after a received signal is lost.
+ *    Implements scan target rotation, retune dwell timing, lock hold
+ *    behaviour, and hang-time state after a received signal is lost.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

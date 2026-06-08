@@ -5,7 +5,9 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Declares the transport-stream routing stage that accepts aligned 188-byte TS packets and forwards selected input data toward the Pluto sink.
+ *    Declares the transport-stream routing stage that accepts aligned
+ *    188-byte TS packets and forwards selected input data toward the Pluto
+ *    sink.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

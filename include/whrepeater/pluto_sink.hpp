@@ -5,7 +5,9 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Declares UDP transport-stream output and MQTT control for PlutoPlus/F5OEO firmware, including transmit mute/PTT and modulation settings.
+ *    Declares UDP transport-stream output and MQTT control for
+ *    PlutoPlus/F5OEO firmware, including transmit mute/PTT and modulation
+ *    settings.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

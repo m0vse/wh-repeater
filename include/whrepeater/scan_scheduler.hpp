@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Declares the receiver scan scheduler responsible for dwell timing, scan target rotation, lock hold, and post-loss hang timing.
+ *    Declares the receiver scan scheduler responsible for dwell timing,
+ *    scan target rotation, lock hold, and post-loss hang timing.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

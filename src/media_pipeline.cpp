@@ -5,7 +5,9 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Builds the continuous generated MPEG-TS output, renders fallback/sleep/access slides, selects H.264 encoders, and optionally streams to RTMP.
+ *    Builds the continuous generated MPEG-TS output, renders
+ *    fallback/sleep/access slides, selects H.264 encoders, and optionally
+ *    streams to RTMP.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

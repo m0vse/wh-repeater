@@ -5,7 +5,9 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Ports Winterhill hardware access into C++ for whdriver, Serit NIM selection, STV0910 demodulators, STV6120 tuners, PIC control, TS reads, and receiver status.
+ *    Ports Winterhill hardware access into C++ for whdriver, Serit NIM
+ *    selection, STV0910 demodulators, STV6120 tuners, PIC control, TS
+ *    reads, and receiver status.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

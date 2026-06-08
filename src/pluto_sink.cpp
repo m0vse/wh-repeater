@@ -5,7 +5,9 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Implements UDP TS output to PlutoPlus and MQTT control messages for transmit mute/PTT, modulation, gain, FEC, symbol rate, and related settings.
+ *    Implements UDP TS output to PlutoPlus and MQTT control messages for
+ *    transmit mute/PTT, modulation, gain, FEC, symbol rate, and related
+ *    settings.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

@@ -5,7 +5,9 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Declares the process-wide mutex used to serialize NIM and SD1 I2C transactions during polling, tuning, config reload, and service teardown.
+ *    Declares the process-wide mutex used to serialize NIM and SD1 I2C
+ *    transactions during polling, tuning, config reload, and service
+ *    teardown.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

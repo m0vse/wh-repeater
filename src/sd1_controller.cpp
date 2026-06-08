@@ -5,7 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Implements direct I2C/PiVideo register access for SD1 detection and lock reporting, including debouncing and background status polling.
+ *    Implements direct I2C/PiVideo register access for SD1 detection and
+ *    lock reporting, including debouncing and background status polling.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
