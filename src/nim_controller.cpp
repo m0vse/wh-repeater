@@ -562,11 +562,10 @@ public:
         }
 
         configureWhDriver();
-        startPacketReader();
-
         initialiseNim(nimDemodAddrA, 0);
         initialiseNim(nimDemodAddrB, 1);
         setRepeaters(-1);
+        startPacketReader();
     }
 
     void tune(ReceiverId receiver, const ScanTarget& target)
@@ -764,6 +763,11 @@ private:
                 std::copy_n(buffer.begin(), packet.ts.size(), packet.ts.begin());
                 packet.status = littleEndianU32(buffer.data() + packet.ts.size());
                 ingestPacket(packet);
+                continue;
+            }
+
+            if (bytesRead >= 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{10});
                 continue;
             }
 

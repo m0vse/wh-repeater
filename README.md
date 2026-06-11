@@ -19,23 +19,30 @@ This is the first working streaming test build. It can:
 - scan configured frequency, symbol-rate, DVB-S/S2 mode, and FEC targets;
 - pause scanning while a receiver is locked, then resume after a configured hang
   time once the signal is lost;
-- detect the Lintest Systems SD1 analogue board over I2C as RX5;
+- support a generic USB/V4L2 analogue capture input, with parked Lintest
+  Systems SD1 support retained for future CSI mode work;
 - serve a local REST API on `127.0.0.1:8080`;
 - serve a web management UI through nginx over HTTPS;
 - generate a continuous MPEG-TS media pipeline with blue fallback/status slides;
 - use the Pi hardware H.264 encoder when `h264_v4l2m2m` is available;
 - stream the generated output to an optional RTMP server;
+- isolate FFmpeg/V4L2 media handling in a supervised child process so the
+  control daemon can restart media output after a media-worker failure;
 - publish PlutoPlus/F5OEO control over MQTT, including TX mute/PTT state;
 - provisionally select the Tezuka DATV MQTT protocol used by 7020/7035
   PlutoSky/Fishball/LibreSDR-class firmware builds;
 - optionally drive a hardware GPIO PTT output for an external amplifier or
   sequencer.
 
-The daemon still has known gaps. Received DVB transport streams are not yet
-decoded, watermarked, and re-encoded into the generated output path. The current
-media pipeline is suitable for fallback/status/RTMP testing and for validating
-Pluto and service control, but live received-video retranscoding is still to be
-completed.
+The media pipeline has a hard fixed-output contract: every source must be
+decoded, scaled, resampled, and transcoded into the configured stream profile so
+RTMP/output video is never interrupted just because the source changes. See
+[`docs/media-stream-contract.md`](docs/media-stream-contract.md).
+
+Media processing runs in a forked child process supervised by the main daemon.
+The child owns FFmpeg, V4L2 codec devices, Pluto UDP output, and RTMP output.
+The parent keeps API/config/scanning/PTT state alive, sends control and selected
+TS packets over a local Unix socket, and restarts the media child if it exits.
 
 ## Requirements
 
@@ -147,13 +154,15 @@ sudo chmod 0644 /etc/ssl/wh-repeater/wh-repeater.crt
 The main sections are:
 
 - `receivers`: RX1-RX4 scan targets, dwell time, and hang time;
-- `analogue.sd1`: optional SD1 analogue receiver detection over I2C;
+- `analogue.capture`: generic USB/V4L2 analogue capture configuration;
+- `analogue.sd1`: parked SD1 analogue configuration, disabled by default;
 - `pluto`: DVB-S/S2 transmit settings, symbol rate, calculated mux/video rates,
-  MQTT host, MQTT protocol/device id, gain, callsign, and watermark text;
-- `fallback`: static slide/video fallback settings and static-frame rate;
+  fixed output width/height/frame rate, MQTT host, MQTT protocol/device id,
+  gain, callsign, and watermark text;
+- `fallback`: static slide/video fallback settings and slide timing;
 - `streaming.rtmp`: optional direct RTMP output URL;
 - `hardwarePtt`: optional GPIO PTT output for amplifier/sequencer switching;
-- `beaconSchedule`: operating hours for beacon/slideshow TX versus sleep mode;
+- `beaconSchedule`: UTC operating hours for beacon/slideshow TX versus sleep mode;
 - `ident`: service name and ident interval;
 - `selection`: minimum signal quality thresholds.
 
@@ -171,10 +180,20 @@ WH_REPEATER_NIM=serit ./build/wh-repeater wh-repeater.json
 The implementation expects the existing whdriver interface exposed by the kernel
 module. It does not create the device node itself.
 
-SD1 access is direct C++ I2C using the PiVideo register protocol. The default SD1
-device is `/dev/i2c-0` at address `0x40`, keeping it separate from the NIM bus on
-`/dev/i2c-1`. NIM and SD1 I2C access still share a process mutex so service
-restarts and config reloads do not intentionally overlap bus transactions.
+Generic analogue capture is wired for USB/V4L2 devices such as UVC composite
+capture dongles. Configure `analogue.capture.captureDevice`, normally
+`/dev/video0`, plus PAL defaults of 720x576 at 25 fps. `lockMode` supports
+`v4l2-sync`, `manual`, `device-present`, and `gpio`. Use `v4l2-sync` for USB
+capture cards that expose input sync state; it only locks when the selected
+V4L2 input is not reporting no-signal or no-hsync. The Automation HAT default
+for GPIO lock is input 1 on `/dev/gpiochip0` line 26, active high.
+
+SD1 analogue support is parked pending confirmed CSI output details from the
+Lintest board. The retained code can read the PiVideo control processor at
+`/dev/i2c-0` address `0x40`, and the latest hardware tests found the emulated
+OV5647 camera endpoint at `0x36` on camera mux bus `i2c-10`, but no completed
+CSI frames were received. Keep `analogue.sd1.enabled` false until the CSI data
+type, lane count, timing, and link frequency are confirmed.
 
 Hardware PTT is disabled by default. When enabled, the daemon uses the Linux GPIO
 character-device API, normally `/dev/gpiochip0`, and asserts the configured line
@@ -183,6 +202,11 @@ hours, hang-time access notices, or live retransmit. The line is forced inactive
 on config reload and daemon shutdown. Keep the GPIO output isolated from the RF
 amplifier keying circuit with suitable buffering or a sequencer; do not connect a
 Pi GPIO directly to an unknown amplifier PTT input.
+
+For Pimoroni Automation HAT, use relay 1 for PTT on GPIO line 13. The HAT's I2C
+devices are expected at `0x48` for ADS1015 analogue inputs and `0x54` for the
+SN3218 LED driver; these addresses were clear on the initial `/dev/i2c-1`
+baseline scan.
 
 Tezuka/F5OEO DATV output is selected with `"mqttProtocol": "tezuka"` in the
 `pluto` config object, plus optional `"mqttDeviceId"` when the firmware's MQTT
@@ -203,7 +227,11 @@ and uses the serial-scoped `cmd/pluto/<device-id>/...` and
   control.
 - `src/pluto_sink.cpp`: Pluto UDP TS output and MQTT transmit control.
 - `src/pluto_mqtt_status.cpp`: Pluto MQTT status subscription.
-- `src/sd1_controller.cpp`: SD1 analogue receiver status over I2C.
+- `src/media_process.cpp`: parent-side media child supervision and IPC.
+- `src/media_pipeline.cpp`: child-side FFmpeg/V4L2 media generation,
+  encoding, RTMP output, and fallback rendering.
+- `src/sd1_controller.cpp`: parked SD1 analogue receiver status over I2C.
+- `docs/sd1-parked.md`: SD1 test findings and restoration notes.
 - `src/api_server.cpp`: localhost REST API.
 - `web/`: static browser management UI.
 - `deploy/`: systemd and nginx deployment files.

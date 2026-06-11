@@ -36,6 +36,8 @@ namespace whrepeater {
 enum class MediaPipelineMode {
     idle,
     retransmit,
+    analogue,
+    fallbackVideo,
     fallback,
 };
 
@@ -50,6 +52,8 @@ public:
     void select(std::optional<ActiveInput> input);
     void setBeaconAllowed(bool allowed);
     void setAccessNotice(std::optional<std::string> notice);
+    void playFallbackVideo(std::string path);
+    void stopFallbackVideo();
     void tick(std::chrono::steady_clock::time_point now);
     void write(std::span<const std::byte> packet) override;
 
@@ -58,6 +62,8 @@ public:
 private:
     void ensureLibavReady();
     void enterRetransmit(std::chrono::steady_clock::time_point now);
+    void enterAnalogue(std::chrono::steady_clock::time_point now);
+    void enterFallbackVideo(std::string path);
     void enterFallback(std::chrono::steady_clock::time_point now, bool transmitEnabled);
     void enterIdle();
     void workerLoop();
@@ -68,10 +74,12 @@ private:
     PlutoSink output_;
     std::optional<ActiveInput> active_;
     std::chrono::steady_clock::time_point lastInput_{std::chrono::steady_clock::now()};
+    std::chrono::steady_clock::time_point analogueRetryAfter_{};
     MediaPipelineMode mode_{MediaPipelineMode::idle};
     bool beaconAllowed_{true};
     bool transmitEnabled_{false};
     std::optional<std::string> accessNotice_;
+    std::optional<std::string> fallbackVideoPath_;
     mutable std::mutex mutex_;
     std::condition_variable inputReady_;
     std::deque<std::byte> inputQueue_;

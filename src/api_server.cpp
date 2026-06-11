@@ -22,6 +22,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <netinet/in.h>
@@ -368,6 +369,22 @@ std::optional<RepeaterConfig> ApiServer::takePendingConfig()
     return config;
 }
 
+std::optional<std::string> ApiServer::takePendingFallbackVideo()
+{
+    std::lock_guard lock{snapshotMutex_};
+    auto path = std::move(pendingFallbackVideo_);
+    pendingFallbackVideo_.reset();
+    return path;
+}
+
+bool ApiServer::takePendingFallbackVideoStop()
+{
+    std::lock_guard lock{snapshotMutex_};
+    const auto pending = pendingFallbackVideoStop_;
+    pendingFallbackVideoStop_ = false;
+    return pending;
+}
+
 void ApiServer::serve()
 {
     while (running_.load()) {
@@ -422,7 +439,7 @@ void ApiServer::handleClient(int clientFd)
 
     const auto method = requestLine.substr(0, firstSpace);
     const auto path = requestLine.substr(firstSpace + 1, secondSpace - firstSpace - 1);
-    if (method != "GET" && method != "PUT") {
+    if (method != "GET" && method != "PUT" && method != "POST") {
         writeResponse(clientFd, "405 Method Not Allowed", "application/json", "{\"error\":\"method not allowed\"}\n");
         return;
     }
@@ -451,12 +468,67 @@ void ApiServer::handleClient(int clientFd)
             {
                 std::lock_guard lock{snapshotMutex_};
                 pendingConfig_ = config;
+                repeaterConfig_ = config;
             }
             writeResponse(clientFd, "202 Accepted", "application/json", "{\"accepted\":true}\n");
         } catch (const std::exception& ex) {
             const auto body = std::string{"{\"error\":"} + jsonString(ex.what()) + "}\n";
             writeResponse(clientFd, "400 Bad Request", "application/json", body);
         }
+        return;
+    }
+
+    if (method == "POST" && path == "/api/fallback/play") {
+        std::string videoPath;
+        const auto bodyStart = request.find("\r\n\r\n");
+        if (bodyStart != std::string_view::npos) {
+            const auto body = request.substr(bodyStart + 4);
+            const auto key = body.find("\"path\"");
+            if (key != std::string_view::npos) {
+                const auto colon = body.find(':', key);
+                const auto firstQuote = colon == std::string_view::npos ? std::string_view::npos : body.find('"', colon);
+                const auto secondQuote = firstQuote == std::string_view::npos ? std::string_view::npos : body.find('"', firstQuote + 1);
+                if (firstQuote != std::string_view::npos && secondQuote != std::string_view::npos) {
+                    videoPath = std::string{body.substr(firstQuote + 1, secondQuote - firstQuote - 1)};
+                }
+            }
+        }
+        {
+            std::lock_guard lock{snapshotMutex_};
+            pendingFallbackVideo_ = std::move(videoPath);
+        }
+        writeResponse(clientFd, "202 Accepted", "application/json", "{\"accepted\":true}\n");
+        return;
+    }
+
+    if (method == "POST" && path == "/api/fallback/stop") {
+        {
+            std::lock_guard lock{snapshotMutex_};
+            pendingFallbackVideoStop_ = true;
+        }
+        writeResponse(clientFd, "202 Accepted", "application/json", "{\"accepted\":true}\n");
+        return;
+    }
+
+    if (method == "POST" && path == "/api/service/start") {
+        const auto status = std::system("systemctl --no-block start wh-repeater.service >/dev/null 2>&1");
+        writeResponse(clientFd,
+                      status == 0 ? "202 Accepted" : "500 Internal Server Error",
+                      "application/json",
+                      status == 0 ? "{\"accepted\":true,\"state\":\"start-requested\"}\n"
+                                  : "{\"error\":\"systemctl start failed\"}\n");
+        return;
+    }
+
+    if (method == "POST" && path == "/api/service/stop") {
+        writeResponse(clientFd, "202 Accepted", "application/json", "{\"accepted\":true,\"state\":\"stop-requested\"}\n");
+        (void)std::system("systemctl --no-block stop wh-repeater.service >/dev/null 2>&1");
+        return;
+    }
+
+    if (method == "POST" && path == "/api/service/restart") {
+        writeResponse(clientFd, "202 Accepted", "application/json", "{\"accepted\":true,\"state\":\"restart-requested\"}\n");
+        (void)std::system("systemctl --no-block restart wh-repeater.service >/dev/null 2>&1");
         return;
     }
 
@@ -539,15 +611,15 @@ std::string ApiServer::statusJson() const
         }
         const auto state = !analogue->present ? "fault" : analogue->locked ? "lockedAnalogue" : analogue->ready ? "idle" : "fault";
         out << "{"
-            << "\"id\":" << config.analogue.sd1.receiver.value << ","
-            << "\"name\":\"SD1\","
+            << "\"id\":" << config.analogue.capture.receiver.value << ","
+            << "\"name\":" << jsonString(config.analogue.capture.label.empty() ? "Analogue" : config.analogue.capture.label) << ","
             << "\"type\":\"analogue\","
-            << "\"deviceId\":" << jsonString(config.analogue.sd1.deviceId) << ","
+            << "\"deviceId\":" << jsonString(config.analogue.capture.deviceId) << ","
             << "\"state\":" << jsonString(state) << ","
             << "\"target\":null,"
             << "\"merDb\":null,"
             << "\"dNumberDb\":null,"
-            << "\"serviceName\":" << jsonString("Analogue " + (analogue->activeSource.empty() ? analogue->selectedSource : analogue->activeSource)) << ","
+            << "\"serviceName\":" << jsonString(config.analogue.capture.label.empty() ? "Analogue" : config.analogue.capture.label) << ","
             << "\"modulation\":\"SD analogue\","
             << "\"transportPackets\":0,"
             << "\"continuityErrors\":0,"

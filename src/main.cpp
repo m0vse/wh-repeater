@@ -25,6 +25,9 @@
 int main(int argc, char** argv)
 {
     try {
+        std::cout.setf(std::ios::unitbuf);
+        std::cerr.setf(std::ios::unitbuf);
+
         const auto explicitConfigPath = argc > 1;
         const auto configPath = explicitConfigPath ? std::filesystem::path{argv[1]} : std::filesystem::path{"wh-repeater.json"};
         auto config = explicitConfigPath || std::filesystem::exists(configPath)

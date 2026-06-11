@@ -31,6 +31,7 @@ const el = {
   receivers: document.querySelector("#receivers"),
   refresh: document.querySelector("#refresh"),
   save: document.querySelector("#save"),
+  serviceRestart: document.querySelector("#service-restart"),
   addReceiver: document.querySelector("#add-receiver"),
   statusInterval: document.querySelector("#status-interval"),
   minimumMer: document.querySelector("#minimum-mer"),
@@ -55,6 +56,9 @@ const el = {
   muxRate: document.querySelector("#mux-rate"),
   videoBitrate: document.querySelector("#video-bitrate"),
   audioBitrate: document.querySelector("#audio-bitrate"),
+  outputWidth: document.querySelector("#output-width"),
+  outputHeight: document.querySelector("#output-height"),
+  outputFrameRate: document.querySelector("#output-frame-rate"),
   plutoFec: document.querySelector("#pluto-fec"),
   hardwarePttEnabled: document.querySelector("#hardware-ptt-enabled"),
   hardwarePttChip: document.querySelector("#hardware-ptt-chip"),
@@ -62,24 +66,45 @@ const el = {
   hardwarePttActiveHigh: document.querySelector("#hardware-ptt-active-high"),
   watermarkText: document.querySelector("#watermark-text"),
   fallbackEnabled: document.querySelector("#fallback-enabled"),
+  fallbackHardwareDecode: document.querySelector("#fallback-hardware-decode"),
   fallbackTimeout: document.querySelector("#fallback-timeout"),
-  fallbackStaticFps: document.querySelector("#fallback-static-fps"),
   fallbackStill: document.querySelector("#fallback-still"),
   fallbackSlideDirectory: document.querySelector("#fallback-slide-directory"),
   fallbackXmasSlideDirectory: document.querySelector("#fallback-xmas-slide-directory"),
   fallbackSlideDuration: document.querySelector("#fallback-slide-duration"),
   fallbackVideos: document.querySelector("#fallback-videos"),
+  fallbackPlayVideo: document.querySelector("#fallback-play-video"),
+  fallbackStopVideo: document.querySelector("#fallback-stop-video"),
   rtmpEnabled: document.querySelector("#rtmp-enabled"),
   rtmpUrl: document.querySelector("#rtmp-url"),
   beaconScheduleEnabled: document.querySelector("#beacon-schedule-enabled"),
   beaconStartTime: document.querySelector("#beacon-start-time"),
   beaconEndTime: document.querySelector("#beacon-end-time"),
+  analogueCaptureEnabled: document.querySelector("#analogue-capture-enabled"),
+  analogueCaptureReceiverId: document.querySelector("#analogue-capture-receiver-id"),
+  analogueCaptureDeviceId: document.querySelector("#analogue-capture-device-id"),
+  analogueCaptureLabel: document.querySelector("#analogue-capture-label"),
+  analogueCaptureDevice: document.querySelector("#analogue-capture-device"),
+  analogueCaptureStandard: document.querySelector("#analogue-capture-standard"),
+  analogueCaptureWidth: document.querySelector("#analogue-capture-width"),
+  analogueCaptureHeight: document.querySelector("#analogue-capture-height"),
+  analogueCaptureFrameRate: document.querySelector("#analogue-capture-frame-rate"),
+  analogueCaptureFrameRateNumerator: document.querySelector("#analogue-capture-frame-rate-numerator"),
+  analogueCaptureFrameRateDenominator: document.querySelector("#analogue-capture-frame-rate-denominator"),
+  analogueCaptureLockMode: document.querySelector("#analogue-capture-lock-mode"),
+  analogueCaptureGpioChip: document.querySelector("#analogue-capture-gpio-chip"),
+  analogueCaptureGpioLine: document.querySelector("#analogue-capture-gpio-line"),
+  analogueCaptureGpioActiveHigh: document.querySelector("#analogue-capture-gpio-active-high"),
   sd1Enabled: document.querySelector("#sd1-enabled"),
   sd1ReceiverId: document.querySelector("#sd1-receiver-id"),
   sd1DeviceId: document.querySelector("#sd1-device-id"),
   sd1I2cDevice: document.querySelector("#sd1-i2c-device"),
   sd1I2cAddress: document.querySelector("#sd1-i2c-address"),
   sd1Source: document.querySelector("#sd1-source"),
+  sd1CaptureDevice: document.querySelector("#sd1-capture-device"),
+  sd1CaptureWidth: document.querySelector("#sd1-capture-width"),
+  sd1CaptureHeight: document.querySelector("#sd1-capture-height"),
+  sd1CaptureFrameRate: document.querySelector("#sd1-capture-frame-rate"),
   identEnabled: document.querySelector("#ident-enabled"),
   serviceName: document.querySelector("#service-name"),
   identInterval: document.querySelector("#ident-interval"),
@@ -102,6 +127,11 @@ function setSaveMessage(message, ok = true) {
 function numberValue(input, fallback = 0) {
   const value = Number(input.value);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function clampedEvenValue(input, fallback, minimum, maximum) {
+  const value = Math.max(minimum, Math.min(maximum, numberValue(input, fallback)));
+  return Math.floor(value / 2) * 2;
 }
 
 function formatValue(value, suffix = "") {
@@ -366,6 +396,9 @@ function fillConfigForm() {
   el.muxRate.value = config.pluto?.muxRateKbps ?? 1200;
   el.videoBitrate.value = config.pluto?.videoBitrateKbps ?? 900;
   el.audioBitrate.value = config.pluto?.audioBitrateKbps ?? 96;
+  el.outputWidth.value = config.pluto?.outputWidth ?? 1280;
+  el.outputHeight.value = config.pluto?.outputHeight ?? 720;
+  el.outputFrameRate.value = config.pluto?.outputFrameRate ?? 25;
   el.plutoFec.value = config.pluto?.fec ?? "1/2";
   el.hardwarePttEnabled.checked = Boolean(config.hardwarePtt?.enabled);
   el.hardwarePttChip.value = config.hardwarePtt?.chip ?? "/dev/gpiochip0";
@@ -373,8 +406,8 @@ function fillConfigForm() {
   el.hardwarePttActiveHigh.checked = config.hardwarePtt?.activeHigh ?? true;
   el.watermarkText.value = config.pluto?.watermarkText ?? "WH Repeater";
   el.fallbackEnabled.checked = config.fallback?.enabled ?? true;
+  el.fallbackHardwareDecode.checked = Boolean(config.fallback?.hardwareDecode);
   el.fallbackTimeout.value = config.fallback?.inputTimeoutMs ?? 1500;
-  el.fallbackStaticFps.value = config.fallback?.staticFrameRate ?? 2;
   el.fallbackStill.value = config.fallback?.stillPath ?? "";
   el.fallbackSlideDirectory.value = config.fallback?.slideDirectory ?? "/var/lib/wh-repeater/slides";
   el.fallbackXmasSlideDirectory.value = config.fallback?.christmasSlideDirectory ?? "/var/lib/wh-repeater/slides/christmas";
@@ -385,12 +418,31 @@ function fillConfigForm() {
   el.beaconScheduleEnabled.checked = Boolean(config.beaconSchedule?.enabled);
   el.beaconStartTime.value = config.beaconSchedule?.startTime ?? "09:00";
   el.beaconEndTime.value = config.beaconSchedule?.endTime ?? "23:00";
-  el.sd1Enabled.checked = config.analogue?.sd1?.enabled ?? true;
+  el.analogueCaptureEnabled.checked = config.analogue?.capture?.enabled ?? false;
+  el.analogueCaptureReceiverId.value = config.analogue?.capture?.receiverId ?? 5;
+  el.analogueCaptureDeviceId.value = config.analogue?.capture?.deviceId ?? "usb-capture";
+  el.analogueCaptureLabel.value = config.analogue?.capture?.label ?? "USB analogue";
+  el.analogueCaptureDevice.value = config.analogue?.capture?.captureDevice ?? "/dev/video0";
+  el.analogueCaptureStandard.value = config.analogue?.capture?.captureStandard ?? "pal";
+  el.analogueCaptureWidth.value = config.analogue?.capture?.captureWidth ?? 720;
+  el.analogueCaptureHeight.value = config.analogue?.capture?.captureHeight ?? 576;
+  el.analogueCaptureFrameRate.value = config.analogue?.capture?.captureFrameRate ?? 25;
+  el.analogueCaptureFrameRateNumerator.value = config.analogue?.capture?.captureFrameRateNumerator ?? config.analogue?.capture?.captureFrameRate ?? 25;
+  el.analogueCaptureFrameRateDenominator.value = config.analogue?.capture?.captureFrameRateDenominator ?? 1;
+  el.analogueCaptureLockMode.value = config.analogue?.capture?.lockMode ?? "v4l2-sync";
+  el.analogueCaptureGpioChip.value = config.analogue?.capture?.gpioChip ?? "/dev/gpiochip0";
+  el.analogueCaptureGpioLine.value = config.analogue?.capture?.gpioLine ?? 26;
+  el.analogueCaptureGpioActiveHigh.checked = config.analogue?.capture?.gpioActiveHigh ?? true;
+  el.sd1Enabled.checked = config.analogue?.sd1?.enabled ?? false;
   el.sd1ReceiverId.value = config.analogue?.sd1?.receiverId ?? 5;
   el.sd1DeviceId.value = config.analogue?.sd1?.deviceId ?? "sd1";
   el.sd1I2cDevice.value = config.analogue?.sd1?.i2cDevice ?? "/dev/i2c-0";
   el.sd1I2cAddress.value = config.analogue?.sd1?.i2cAddress ?? 64;
   el.sd1Source.value = config.analogue?.sd1?.source ?? "auto";
+  el.sd1CaptureDevice.value = config.analogue?.sd1?.captureDevice ?? "/dev/video0";
+  el.sd1CaptureWidth.value = config.analogue?.sd1?.captureWidth ?? 640;
+  el.sd1CaptureHeight.value = config.analogue?.sd1?.captureHeight ?? 480;
+  el.sd1CaptureFrameRate.value = config.analogue?.sd1?.captureFrameRate ?? 25;
   el.identEnabled.checked = Boolean(config.ident?.enabled);
   el.serviceName.value = config.ident?.serviceName ?? "WH Repeater";
   el.identInterval.value = config.ident?.intervalSeconds ?? 600;
@@ -515,13 +567,17 @@ function readConfigForm() {
       muxRateKbps: numberValue(el.muxRate, 1200),
       videoBitrateKbps: numberValue(el.videoBitrate, 900),
       audioBitrateKbps: numberValue(el.audioBitrate, 96),
+      outputWidth: clampedEvenValue(el.outputWidth, 1280, 320, 1920),
+      outputHeight: clampedEvenValue(el.outputHeight, 720, 240, 1080),
+      outputFrameRate: Math.max(1, Math.min(50, numberValue(el.outputFrameRate, 25))),
       fec: el.plutoFec.value,
       watermarkText: el.watermarkText.value,
     },
     fallback: {
       enabled: el.fallbackEnabled.checked,
+      hardwareDecode: el.fallbackHardwareDecode.checked,
       inputTimeoutMs: numberValue(el.fallbackTimeout, 1500),
-      staticFrameRate: Math.min(25, Math.max(1, numberValue(el.fallbackStaticFps, 2))),
+      staticFrameRate: state.config?.fallback?.staticFrameRate ?? 2,
       stillPath: el.fallbackStill.value,
       slideDirectory: el.fallbackSlideDirectory.value || "/var/lib/wh-repeater/slides",
       christmasSlideDirectory: el.fallbackXmasSlideDirectory.value || "/var/lib/wh-repeater/slides/christmas",
@@ -546,6 +602,23 @@ function readConfigForm() {
       endTime: el.beaconEndTime.value || "23:00",
     },
     analogue: {
+      capture: {
+        enabled: el.analogueCaptureEnabled.checked,
+        receiverId: numberValue(el.analogueCaptureReceiverId, 5),
+        deviceId: el.analogueCaptureDeviceId.value || "usb-capture",
+        label: el.analogueCaptureLabel.value || "USB analogue",
+        captureDevice: el.analogueCaptureDevice.value || "/dev/video0",
+        captureStandard: el.analogueCaptureStandard.value || "pal",
+        captureWidth: numberValue(el.analogueCaptureWidth, 720),
+        captureHeight: numberValue(el.analogueCaptureHeight, 576),
+        captureFrameRate: numberValue(el.analogueCaptureFrameRate, 25),
+        captureFrameRateNumerator: numberValue(el.analogueCaptureFrameRateNumerator, numberValue(el.analogueCaptureFrameRate, 25)),
+        captureFrameRateDenominator: numberValue(el.analogueCaptureFrameRateDenominator, 1),
+        lockMode: el.analogueCaptureLockMode.value || "v4l2-sync",
+        gpioChip: el.analogueCaptureGpioChip.value || "/dev/gpiochip0",
+        gpioLine: numberValue(el.analogueCaptureGpioLine, 26),
+        gpioActiveHigh: el.analogueCaptureGpioActiveHigh.checked,
+      },
       sd1: {
         enabled: el.sd1Enabled.checked,
         receiverId: numberValue(el.sd1ReceiverId, 5),
@@ -553,6 +626,10 @@ function readConfigForm() {
         i2cDevice: el.sd1I2cDevice.value || "/dev/i2c-0",
         i2cAddress: numberValue(el.sd1I2cAddress, 64),
         source: el.sd1Source.value,
+        captureDevice: el.sd1CaptureDevice.value || "/dev/video0",
+        captureWidth: numberValue(el.sd1CaptureWidth, 640),
+        captureHeight: numberValue(el.sd1CaptureHeight, 480),
+        captureFrameRate: numberValue(el.sd1CaptureFrameRate, 25),
       },
     },
     ident: {
@@ -704,10 +781,73 @@ async function saveConfig() {
   setMessage("Connected");
 }
 
+async function playFallbackVideo() {
+  const path = el.fallbackVideos.value.split(",").map((value) => value.trim()).find(Boolean) ?? "";
+  const response = await fetch("/api/fallback/play", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
+  setSaveMessage("Fallback video triggered");
+  await loadStatus();
+}
+
+async function stopFallbackVideo() {
+  const response = await fetch("/api/fallback/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
+  setSaveMessage("Fallback video stopped");
+  await loadStatus();
+}
+
+async function requestServiceAction(action) {
+  const response = await fetch(`/api/service/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
+  setSaveMessage(`Service ${action} requested`);
+  if (action === "restart" || action === "stop") {
+    setMessage(action === "restart" ? "Restarting" : "Stopping");
+    return;
+  }
+  await loadStatus();
+}
+
 el.refresh.addEventListener("click", refreshAll);
 el.save.addEventListener("click", () => {
   saveConfig().catch((error) => setSaveMessage(`Save failed: ${error.message}`, false));
 });
+if (el.fallbackPlayVideo) {
+  el.fallbackPlayVideo.addEventListener("click", () => {
+    playFallbackVideo().catch((error) => setSaveMessage(`Fallback video failed: ${error.message}`, false));
+  });
+}
+if (el.fallbackStopVideo) {
+  el.fallbackStopVideo.addEventListener("click", () => {
+    stopFallbackVideo().catch((error) => setSaveMessage(`Stop fallback video failed: ${error.message}`, false));
+  });
+}
+if (el.serviceRestart) {
+  el.serviceRestart.addEventListener("click", () => {
+    if (!window.confirm("Restart wh-repeater service now?")) {
+      return;
+    }
+    requestServiceAction("restart").catch((error) => setSaveMessage(`Restart failed: ${error.message}`, false));
+  });
+}
 if (el.addReceiver) {
   el.addReceiver.addEventListener("click", () => {
     const nextId = el.receivers.querySelectorAll(".receiver").length + 1;
@@ -738,6 +878,9 @@ for (const input of [
   el.plutoFecMode,
   el.plutoConstellation,
   el.audioBitrate,
+  el.outputWidth,
+  el.outputHeight,
+  el.outputFrameRate,
   el.plutoFec,
   el.hardwarePttEnabled,
   el.hardwarePttChip,
@@ -745,8 +888,8 @@ for (const input of [
   el.hardwarePttActiveHigh,
   el.watermarkText,
   el.fallbackEnabled,
+  el.fallbackHardwareDecode,
   el.fallbackTimeout,
-  el.fallbackStaticFps,
   el.fallbackStill,
   el.fallbackSlideDirectory,
   el.fallbackXmasSlideDirectory,
@@ -757,12 +900,28 @@ for (const input of [
   el.beaconScheduleEnabled,
   el.beaconStartTime,
   el.beaconEndTime,
+  el.analogueCaptureEnabled,
+  el.analogueCaptureReceiverId,
+  el.analogueCaptureDeviceId,
+  el.analogueCaptureLabel,
+  el.analogueCaptureDevice,
+  el.analogueCaptureWidth,
+  el.analogueCaptureHeight,
+  el.analogueCaptureFrameRate,
+  el.analogueCaptureLockMode,
+  el.analogueCaptureGpioChip,
+  el.analogueCaptureGpioLine,
+  el.analogueCaptureGpioActiveHigh,
   el.sd1Enabled,
   el.sd1ReceiverId,
   el.sd1DeviceId,
   el.sd1I2cDevice,
   el.sd1I2cAddress,
   el.sd1Source,
+  el.sd1CaptureDevice,
+  el.sd1CaptureWidth,
+  el.sd1CaptureHeight,
+  el.sd1CaptureFrameRate,
   el.identEnabled,
   el.serviceName,
   el.identInterval,

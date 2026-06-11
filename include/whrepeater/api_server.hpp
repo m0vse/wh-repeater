@@ -54,6 +54,8 @@ public:
     void updatePlutoStatus(PlutoMqttStatus status);
     void updateBeaconSchedule(bool active);
     std::optional<RepeaterConfig> takePendingConfig();
+    std::optional<std::string> takePendingFallbackVideo();
+    bool takePendingFallbackVideoStop();
 
 private:
     void serve();
@@ -70,6 +72,8 @@ private:
     bool beaconScheduleActive_{true};
     std::optional<ActiveInput> active_;
     std::optional<RepeaterConfig> pendingConfig_;
+    std::optional<std::string> pendingFallbackVideo_;
+    bool pendingFallbackVideoStop_{false};
     std::atomic_bool running_{false};
     int serverFd_{-1};
     std::thread serverThread_;

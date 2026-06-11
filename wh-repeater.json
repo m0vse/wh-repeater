@@ -25,6 +25,9 @@
     "muxRateKbps": 3686,
     "videoBitrateKbps": 3590,
     "audioBitrateKbps": 96,
+    "outputWidth": 1280,
+    "outputHeight": 720,
+    "outputFrameRate": 25,
     "fec": "1/2",
     "watermarkText": "GB3GV"
   },
@@ -47,7 +50,7 @@
   "hardwarePtt": {
     "enabled": false,
     "chip": "/dev/gpiochip0",
-    "line": 0,
+    "line": 13,
     "activeHigh": true
   },
   "beaconSchedule": {
@@ -63,13 +66,34 @@
     "morseWpm": 10
   },
   "analogue": {
+    "capture": {
+      "enabled": false,
+      "receiverId": 5,
+      "deviceId": "usb-capture",
+      "label": "USB analogue",
+      "captureDevice": "/dev/video0",
+      "captureStandard": "pal",
+      "captureWidth": 720,
+      "captureHeight": 576,
+      "captureFrameRate": 25,
+      "captureFrameRateNumerator": 25,
+      "captureFrameRateDenominator": 1,
+      "lockMode": "v4l2-sync",
+      "gpioChip": "/dev/gpiochip0",
+      "gpioLine": 26,
+      "gpioActiveHigh": true
+    },
     "sd1": {
-      "enabled": true,
+      "enabled": false,
       "receiverId": 5,
       "deviceId": "sd1",
       "i2cDevice": "/dev/i2c-0",
       "i2cAddress": 64,
-      "source": "auto"
+      "source": "auto",
+      "captureDevice": "/dev/video0",
+      "captureWidth": 640,
+      "captureHeight": 480,
+      "captureFrameRate": 25
     }
   },
   "receivers": [

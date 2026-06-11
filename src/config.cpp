@@ -683,6 +683,15 @@ RepeaterConfig configFromJson(std::string_view text)
         if (const auto* audioBitrateKbps = optionalMember(*pluto, "audioBitrateKbps")) {
             config.pluto.audioBitrateKbps = jsonUint32(*audioBitrateKbps, "pluto.audioBitrateKbps");
         }
+        if (const auto* outputWidth = optionalMember(*pluto, "outputWidth")) {
+            config.pluto.outputWidth = std::clamp(jsonUint32(*outputWidth, "pluto.outputWidth"), 320U, 1920U) & ~1U;
+        }
+        if (const auto* outputHeight = optionalMember(*pluto, "outputHeight")) {
+            config.pluto.outputHeight = std::clamp(jsonUint32(*outputHeight, "pluto.outputHeight"), 240U, 1080U) & ~1U;
+        }
+        if (const auto* outputFrameRate = optionalMember(*pluto, "outputFrameRate")) {
+            config.pluto.outputFrameRate = std::clamp(jsonUint32(*outputFrameRate, "pluto.outputFrameRate"), 1U, 50U);
+        }
         if (const auto* fec = optionalMember(*pluto, "fec")) {
             const auto parsedFec = parseFec(jsonText(*fec, "pluto.fec"));
             if (parsedFec == "auto") {
@@ -719,6 +728,9 @@ RepeaterConfig configFromJson(std::string_view text)
         }
         if (const auto* staticFrameRate = optionalMember(*fallback, "staticFrameRate")) {
             config.fallback.staticFrameRate = std::clamp(jsonUint32(*staticFrameRate, "fallback.staticFrameRate"), 1U, 25U);
+        }
+        if (const auto* hardwareDecode = optionalMember(*fallback, "hardwareDecode")) {
+            config.fallback.hardwareDecode = jsonBool(*hardwareDecode, "fallback.hardwareDecode");
         }
         if (const auto* videoPaths = optionalMember(*fallback, "videoPaths")) {
             if (videoPaths->type != Json::Type::array) {
@@ -788,6 +800,69 @@ RepeaterConfig configFromJson(std::string_view text)
     }
 
     if (const auto* analogue = optionalMember(root, "analogue")) {
+        if (const auto* capture = optionalMember(*analogue, "capture")) {
+            if (const auto* enabled = optionalMember(*capture, "enabled")) {
+                config.analogue.capture.enabled = jsonBool(*enabled, "analogue.capture.enabled");
+            }
+            if (const auto* receiverId = optionalMember(*capture, "receiverId")) {
+                config.analogue.capture.receiver = ReceiverId{jsonInt(*receiverId, "analogue.capture.receiverId")};
+                if (config.analogue.capture.receiver.value < 1) {
+                    throw std::runtime_error{"analogue.capture.receiverId must be positive"};
+                }
+            }
+            if (const auto* deviceId = optionalMember(*capture, "deviceId")) {
+                config.analogue.capture.deviceId = jsonText(*deviceId, "analogue.capture.deviceId");
+            }
+            if (const auto* label = optionalMember(*capture, "label")) {
+                config.analogue.capture.label = jsonText(*label, "analogue.capture.label");
+            }
+            if (const auto* captureDevice = optionalMember(*capture, "captureDevice")) {
+                config.analogue.capture.captureDevice = jsonText(*captureDevice, "analogue.capture.captureDevice");
+            }
+            if (const auto* captureStandard = optionalMember(*capture, "captureStandard")) {
+                config.analogue.capture.captureStandard = jsonText(*captureStandard, "analogue.capture.captureStandard");
+                if (config.analogue.capture.captureStandard != "pal"
+                    && config.analogue.capture.captureStandard != "ntsc"
+                    && config.analogue.capture.captureStandard != "secam") {
+                    throw std::runtime_error{"analogue.capture.captureStandard must be pal, ntsc, or secam"};
+                }
+            }
+            if (const auto* captureWidth = optionalMember(*capture, "captureWidth")) {
+                config.analogue.capture.captureWidth = std::clamp(jsonUint32(*captureWidth, "analogue.capture.captureWidth"), 160U, 1920U);
+            }
+            if (const auto* captureHeight = optionalMember(*capture, "captureHeight")) {
+                config.analogue.capture.captureHeight = std::clamp(jsonUint32(*captureHeight, "analogue.capture.captureHeight"), 120U, 1080U);
+            }
+            if (const auto* captureFrameRate = optionalMember(*capture, "captureFrameRate")) {
+                config.analogue.capture.captureFrameRate = std::clamp(jsonUint32(*captureFrameRate, "analogue.capture.captureFrameRate"), 1U, 50U);
+                config.analogue.capture.captureFrameRateNumerator = config.analogue.capture.captureFrameRate;
+                config.analogue.capture.captureFrameRateDenominator = 1;
+            }
+            if (const auto* frameRateNumerator = optionalMember(*capture, "captureFrameRateNumerator")) {
+                config.analogue.capture.captureFrameRateNumerator = std::clamp(jsonUint32(*frameRateNumerator, "analogue.capture.captureFrameRateNumerator"), 1U, 60000U);
+            }
+            if (const auto* frameRateDenominator = optionalMember(*capture, "captureFrameRateDenominator")) {
+                config.analogue.capture.captureFrameRateDenominator = std::clamp(jsonUint32(*frameRateDenominator, "analogue.capture.captureFrameRateDenominator"), 1U, 1001U);
+            }
+            if (const auto* lockMode = optionalMember(*capture, "lockMode")) {
+                config.analogue.capture.lockMode = jsonText(*lockMode, "analogue.capture.lockMode");
+                if (config.analogue.capture.lockMode != "manual"
+                    && config.analogue.capture.lockMode != "device-present"
+                    && config.analogue.capture.lockMode != "v4l2-sync"
+                    && config.analogue.capture.lockMode != "gpio") {
+                    throw std::runtime_error{"analogue.capture.lockMode must be manual, device-present, v4l2-sync, or gpio"};
+                }
+            }
+            if (const auto* gpioChip = optionalMember(*capture, "gpioChip")) {
+                config.analogue.capture.gpioChip = jsonText(*gpioChip, "analogue.capture.gpioChip");
+            }
+            if (const auto* gpioLine = optionalMember(*capture, "gpioLine")) {
+                config.analogue.capture.gpioLine = jsonUint32(*gpioLine, "analogue.capture.gpioLine");
+            }
+            if (const auto* gpioActiveHigh = optionalMember(*capture, "gpioActiveHigh")) {
+                config.analogue.capture.gpioActiveHigh = jsonBool(*gpioActiveHigh, "analogue.capture.gpioActiveHigh");
+            }
+        }
         if (const auto* sd1 = optionalMember(*analogue, "sd1")) {
             if (const auto* enabled = optionalMember(*sd1, "enabled")) {
                 config.analogue.sd1.enabled = jsonBool(*enabled, "analogue.sd1.enabled");
@@ -813,6 +888,18 @@ RepeaterConfig configFromJson(std::string_view text)
             }
             if (const auto* source = optionalMember(*sd1, "source")) {
                 config.analogue.sd1.source = jsonText(*source, "analogue.sd1.source");
+            }
+            if (const auto* captureDevice = optionalMember(*sd1, "captureDevice")) {
+                config.analogue.sd1.captureDevice = jsonText(*captureDevice, "analogue.sd1.captureDevice");
+            }
+            if (const auto* captureWidth = optionalMember(*sd1, "captureWidth")) {
+                config.analogue.sd1.captureWidth = std::clamp(jsonUint32(*captureWidth, "analogue.sd1.captureWidth"), 160U, 1920U);
+            }
+            if (const auto* captureHeight = optionalMember(*sd1, "captureHeight")) {
+                config.analogue.sd1.captureHeight = std::clamp(jsonUint32(*captureHeight, "analogue.sd1.captureHeight"), 120U, 1080U);
+            }
+            if (const auto* captureFrameRate = optionalMember(*sd1, "captureFrameRate")) {
+                config.analogue.sd1.captureFrameRate = std::clamp(jsonUint32(*captureFrameRate, "analogue.sd1.captureFrameRate"), 1U, 50U);
             }
         }
     }
@@ -882,6 +969,9 @@ std::string configToJson(const RepeaterConfig& config)
         << "    \"muxRateKbps\": " << calculatePlutoMuxRateKbps(config.pluto) << ",\n"
         << "    \"videoBitrateKbps\": " << calculatePlutoVideoBitrateKbps(config.pluto) << ",\n"
         << "    \"audioBitrateKbps\": " << config.pluto.audioBitrateKbps << ",\n"
+        << "    \"outputWidth\": " << config.pluto.outputWidth << ",\n"
+        << "    \"outputHeight\": " << config.pluto.outputHeight << ",\n"
+        << "    \"outputFrameRate\": " << config.pluto.outputFrameRate << ",\n"
         << "    \"fec\": " << jsonString(config.pluto.fec) << ",\n"
         << "    \"watermarkText\": " << jsonString(config.pluto.watermarkText) << "\n"
         << "  },\n"
@@ -893,6 +983,7 @@ std::string configToJson(const RepeaterConfig& config)
         << "    \"slideDurationSeconds\": " << (config.fallback.slideDuration.count() / 1000) << ",\n"
         << "    \"inputTimeoutMs\": " << config.fallback.inputTimeout.count() << ",\n"
         << "    \"staticFrameRate\": " << config.fallback.staticFrameRate << ",\n"
+        << "    \"hardwareDecode\": " << (config.fallback.hardwareDecode ? "true" : "false") << ",\n"
         << "    \"videoPaths\": [";
     for (std::size_t index = 0; index < config.fallback.videoPaths.size(); ++index) {
         if (index != 0) {
@@ -927,13 +1018,34 @@ std::string configToJson(const RepeaterConfig& config)
         << "    \"morseWpm\": " << config.ident.morseWpm << "\n"
         << "  },\n"
         << "  \"analogue\": {\n"
+        << "    \"capture\": {\n"
+        << "      \"enabled\": " << (config.analogue.capture.enabled ? "true" : "false") << ",\n"
+        << "      \"receiverId\": " << config.analogue.capture.receiver.value << ",\n"
+        << "      \"deviceId\": " << jsonString(config.analogue.capture.deviceId) << ",\n"
+        << "      \"label\": " << jsonString(config.analogue.capture.label) << ",\n"
+        << "      \"captureDevice\": " << jsonString(config.analogue.capture.captureDevice) << ",\n"
+        << "      \"captureStandard\": " << jsonString(config.analogue.capture.captureStandard) << ",\n"
+        << "      \"captureWidth\": " << config.analogue.capture.captureWidth << ",\n"
+        << "      \"captureHeight\": " << config.analogue.capture.captureHeight << ",\n"
+        << "      \"captureFrameRate\": " << config.analogue.capture.captureFrameRate << ",\n"
+        << "      \"captureFrameRateNumerator\": " << config.analogue.capture.captureFrameRateNumerator << ",\n"
+        << "      \"captureFrameRateDenominator\": " << config.analogue.capture.captureFrameRateDenominator << ",\n"
+        << "      \"lockMode\": " << jsonString(config.analogue.capture.lockMode) << ",\n"
+        << "      \"gpioChip\": " << jsonString(config.analogue.capture.gpioChip) << ",\n"
+        << "      \"gpioLine\": " << config.analogue.capture.gpioLine << ",\n"
+        << "      \"gpioActiveHigh\": " << (config.analogue.capture.gpioActiveHigh ? "true" : "false") << "\n"
+        << "    },\n"
         << "    \"sd1\": {\n"
         << "      \"enabled\": " << (config.analogue.sd1.enabled ? "true" : "false") << ",\n"
         << "      \"receiverId\": " << config.analogue.sd1.receiver.value << ",\n"
         << "      \"deviceId\": " << jsonString(config.analogue.sd1.deviceId) << ",\n"
         << "      \"i2cDevice\": " << jsonString(config.analogue.sd1.i2cDevice) << ",\n"
         << "      \"i2cAddress\": " << static_cast<int>(config.analogue.sd1.i2cAddress) << ",\n"
-        << "      \"source\": " << jsonString(config.analogue.sd1.source) << "\n"
+        << "      \"source\": " << jsonString(config.analogue.sd1.source) << ",\n"
+        << "      \"captureDevice\": " << jsonString(config.analogue.sd1.captureDevice) << ",\n"
+        << "      \"captureWidth\": " << config.analogue.sd1.captureWidth << ",\n"
+        << "      \"captureHeight\": " << config.analogue.sd1.captureHeight << ",\n"
+        << "      \"captureFrameRate\": " << config.analogue.sd1.captureFrameRate << "\n"
         << "    }\n"
         << "  },\n"
         << "  \"receivers\": [\n";

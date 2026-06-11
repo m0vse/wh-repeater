@@ -10,6 +10,9 @@ WorkingDirectory=/var/lib/wh-repeater
 ExecStart=/usr/local/bin/wh-repeater /etc/wh-repeater/wh-repeater.json
 Restart=on-failure
 RestartSec=2s
+TimeoutStopSec=15s
+KillMode=mixed
+FinalKillSignal=SIGKILL
 StateDirectory=wh-repeater
 
 [Install]

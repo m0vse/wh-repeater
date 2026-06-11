@@ -49,6 +49,9 @@ struct PlutoConfig {
     std::uint32_t muxRateKbps{1200};
     std::uint32_t videoBitrateKbps{900};
     std::uint32_t audioBitrateKbps{96};
+    std::uint32_t outputWidth{1280};
+    std::uint32_t outputHeight{720};
+    std::uint32_t outputFrameRate{25};
     std::string fec{"1/2"};
     std::string watermarkText{"WH Repeater"};
 };
@@ -62,6 +65,7 @@ struct FallbackConfig {
     std::chrono::milliseconds slideDuration{10000};
     std::chrono::milliseconds inputTimeout{1500};
     std::uint32_t staticFrameRate{2};
+    bool hardwareDecode{false};
 };
 
 struct RtmpStreamingConfig {
@@ -95,15 +99,38 @@ struct HardwarePttConfig {
 };
 
 struct Sd1Config {
-    bool enabled{true};
+    bool enabled{false};
     ReceiverId receiver{5};
     std::string deviceId{"sd1"};
     std::string i2cDevice{"/dev/i2c-0"};
     std::uint8_t i2cAddress{0x40};
     std::string source{"auto"};
+    std::string captureDevice{"/dev/video0"};
+    std::uint32_t captureWidth{640};
+    std::uint32_t captureHeight{480};
+    std::uint32_t captureFrameRate{25};
+};
+
+struct AnalogueCaptureConfig {
+    bool enabled{false};
+    ReceiverId receiver{5};
+    std::string deviceId{"usb-capture"};
+    std::string label{"USB analogue"};
+    std::string captureDevice{"/dev/video0"};
+    std::string captureStandard{"pal"};
+    std::uint32_t captureWidth{720};
+    std::uint32_t captureHeight{576};
+    std::uint32_t captureFrameRate{25};
+    std::uint32_t captureFrameRateNumerator{25};
+    std::uint32_t captureFrameRateDenominator{1};
+    std::string lockMode{"v4l2-sync"};
+    std::string gpioChip{"/dev/gpiochip0"};
+    std::uint32_t gpioLine{26};
+    bool gpioActiveHigh{true};
 };
 
 struct AnalogueConfig {
+    AnalogueCaptureConfig capture;
     Sd1Config sd1;
 };
 
