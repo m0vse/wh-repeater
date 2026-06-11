@@ -28,6 +28,8 @@
     "outputWidth": 1280,
     "outputHeight": 720,
     "outputFrameRate": 25,
+    "h264Profile": "main",
+    "h264Level": "auto",
     "fec": "1/2",
     "watermarkText": "GB3GV"
   },
@@ -46,6 +48,9 @@
       "enabled": false,
       "url": ""
     }
+  },
+  "media": {
+    "backend": "ffmpeg"
   },
   "hardwarePtt": {
     "enabled": false,

@@ -24,8 +24,22 @@ Required invariants:
 
 - The encoded video parameters are owned by the repeater output configuration,
   not by the active input.
+- H.264 output encoding must always use the Raspberry Pi hardware encoder. The
+  daemon must not silently fall back to `libx264`, OpenH264, or any other
+  software H.264 encoder for generated fallback, fallback video playback, live
+  DVB retransmit, analogue capture, Pluto TS output, or RTMP output.
+- If the hardware encoder cannot be opened, the media path must fail loudly and
+  remain supervised/restartable. High-CPU software encode is not an acceptable
+  degraded mode for the installed repeater.
+- Hardware decode is preferred for received or file inputs, but software decode
+  fallback is allowed when hardware decode is unavailable, unsuitable for a
+  specific stream, or less stable on the current Pi stack.
 - The configured output width, height, and frame rate define the single video
   profile used by generated fallback, live inputs, Pluto TS output, and RTMP.
+- The configured H.264 profile and level are part of that same output contract.
+  Profile may be `baseline`, `main`, or `high`; level may be explicit or `auto`.
+  Automatic level selection uses 3.1 for outputs up to 1280x720 and 4 above
+  1280x720.
 - Fallback slides, fallback videos, DVB receive, analogue capture, access
   notices, sleep slates, and testcards must all be transcoded into the same
   configured output video format.
@@ -34,6 +48,14 @@ Required invariants:
   parameters, frame dimensions, frame rate, time base, or audio parameters.
 - Invalid, missing, or stalled input must be replaced with valid generated
   frames and valid audio/silence so encoder time continues monotonically.
+- The H.264 encoder boundary must validate every submitted frame. A frame is
+  valid only if it matches the configured encoder pixel format, dimensions, and
+  timing, has populated data planes, and has a monotonic presentation timestamp.
+- Invalid video must be replaced before encode with a generated frame in the
+  configured output format. Invalid audio must be replaced before encode with
+  silence in the configured output audio format.
+- Input demux/decode errors are source errors, not encoder input. They must not
+  be forwarded as malformed frames or used to renegotiate output parameters.
 - RTMP viewers may need to reconnect after a daemon or network failure, but not
   because the daemon switched media source.
 - During fallback-video file playback, stability and uninterrupted output take
@@ -52,6 +74,9 @@ Output path:
 - The media path runs inside the supervised media child process. The parent
   daemon sends commands and selected TS packets, but raw decoded video frames
   stay inside the child process to avoid IPC copies.
+- The FFmpeg backend is the stable implementation. The optional GStreamer
+  backend is intended as a complete media replacement and must obey the same
+  fixed-output contract, including mandatory hardware H.264 encode.
 - The encoded transport stream is written to the Pluto UDP sink.
 - The same encoded packets are mirrored to the persistent RTMP muxer.
 - Once RTMP has accepted its first video/audio profile, later source changes

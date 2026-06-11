@@ -74,11 +74,13 @@ private:
     PlutoSink output_;
     std::optional<ActiveInput> active_;
     std::chrono::steady_clock::time_point lastInput_{std::chrono::steady_clock::now()};
+    std::chrono::steady_clock::time_point liveRetryAfter_{};
     std::chrono::steady_clock::time_point analogueRetryAfter_{};
     MediaPipelineMode mode_{MediaPipelineMode::idle};
     bool beaconAllowed_{true};
     bool transmitEnabled_{false};
     std::optional<std::string> accessNotice_;
+    std::optional<std::string> streamIndicator_;
     std::optional<std::string> fallbackVideoPath_;
     mutable std::mutex mutex_;
     std::condition_variable inputReady_;

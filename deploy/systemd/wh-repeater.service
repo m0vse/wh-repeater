@@ -6,7 +6,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=WH_REPEATER_NIM=serit
+Environment=GST_V4L2_ENABLE_PROBE=1
+Environment=GST_REGISTRY=/var/lib/wh-repeater/gstreamer-registry.bin
 WorkingDirectory=/var/lib/wh-repeater
+ExecStartPre=/usr/bin/rm -f /var/lib/wh-repeater/gstreamer-registry.bin
 ExecStart=/usr/local/bin/wh-repeater /etc/wh-repeater/wh-repeater.json
 Restart=on-failure
 RestartSec=2s

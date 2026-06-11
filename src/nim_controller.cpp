@@ -117,7 +117,7 @@ constexpr std::uint32_t nimTunerXtalKhz = 30'000;
 constexpr std::uint32_t nimDemodMclkHz = 135'000'000;
 constexpr std::uint16_t stv0910PllLockTimeout = 100;
 constexpr std::uint16_t stv6120CalTimeout = 200;
-constexpr std::size_t maxQueuedPacketsPerReceiver = 4096;
+constexpr std::size_t maxQueuedPacketsPerReceiver = 65536;
 
 constexpr std::uint32_t stv0910FieldCp = 0xf1b330f8;
 constexpr std::uint32_t stv0910FieldIdf = 0xf1b30007;
@@ -142,6 +142,9 @@ constexpr std::array<std::array<std::uint32_t, 3>, 7> stv6120IcpLookup{{
     {4'395'000, 4'760'000, 7},
 }};
 
+constexpr auto validTransportTimeout = std::chrono::milliseconds{1500};
+constexpr auto falseLockSuppressDuration = std::chrono::milliseconds{5000};
+
 constexpr std::array<std::uint16_t, 32> stv6120Cfhf{
     6796, 5828, 4778, 4118, 3513, 3136, 2794, 2562,
     2331, 2169, 2006, 1890, 1771, 1680, 1586, 1514,
@@ -163,8 +166,22 @@ struct WhDriverPacket {
     std::uint32_t status{};
 };
 
+constexpr std::array<std::uint8_t, 188> nullTransportPacket()
+{
+    std::array<std::uint8_t, 188> packet{};
+    packet.fill(0xff);
+    packet[0] = 0x47;
+    packet[1] = 0x1f;
+    packet[2] = 0xff;
+    packet[3] = 0x00;
+    return packet;
+}
+
+constexpr auto nullPacket = nullTransportPacket();
+
 struct PacketCounters {
     std::uint64_t transportPackets{};
+    std::uint64_t validPackets{};
     std::uint64_t nullPackets{};
     std::uint64_t syncErrors{};
     std::uint64_t inSequenceErrors{};
@@ -554,6 +571,7 @@ public:
             std::lock_guard lock{packetCountersMutex_};
             packetCounters_ = {};
         }
+        validPacketWatch_ = {};
         {
             std::lock_guard lock{packetQueuesMutex_};
             for (auto& queue : packetQueues_) {
@@ -579,6 +597,8 @@ public:
         status.merDb.reset();
         status.dNumberDb.reset();
         status.modulation.reset();
+        clearReceiverPacketQueue(receiver);
+        baselineValidPacketWatch(receiver, true);
 
         if (!nimPresent_[hw.nimIndex]) {
             status.state = ReceiverState::fault;
@@ -650,6 +670,7 @@ public:
     std::vector<ReceiverStatus> pollStatus()
     {
         std::lock_guard i2cLock{sharedI2cBusMutex()};
+        const auto now = std::chrono::steady_clock::now();
         for (auto& status : statuses_) {
             if (!status.target.has_value()) {
                 continue;
@@ -664,20 +685,38 @@ public:
 
             const auto dmdState = i2c_.readReg16(hw.nimAddress, dmdStateRegister(hw.tuner));
             status.state = stateFromHeaderMode(dmdState);
+            const auto counters = countersFor(status.receiver);
             if (status.state == ReceiverState::lockedDvbs || status.state == ReceiverState::lockedDvbs2) {
+                if (!validTransportFresh(status.receiver, counters.validPackets, now)) {
+                    status.state = ReceiverState::lost;
+                    status.merDb.reset();
+                    status.dNumberDb.reset();
+                    status.modulation.reset();
+                    status.transportPackets = counters.transportPackets;
+                    status.continuityErrors = counters.syncErrors
+                        + counters.inSequenceErrors
+                        + counters.outSequenceErrors
+                        + counters.restartErrors
+                        + counters.overflowErrors;
+                    status.updatedAt = now;
+                    continue;
+                }
                 if (auto mer = readMerDb(hw); mer.has_value()) {
                     status.merDb = mer;
                 }
+            } else {
+                status.merDb.reset();
+                status.dNumberDb.reset();
+                status.modulation.reset();
             }
 
-            const auto counters = countersFor(status.receiver);
             status.transportPackets = counters.transportPackets;
             status.continuityErrors = counters.syncErrors
                 + counters.inSequenceErrors
                 + counters.outSequenceErrors
                 + counters.restartErrors
                 + counters.overflowErrors;
-            status.updatedAt = std::chrono::steady_clock::now();
+            status.updatedAt = now;
         }
 
         return statuses_;
@@ -729,11 +768,11 @@ private:
             throw std::runtime_error{"cannot find spi5 interrupt number in " + config_.interruptsFile.string()};
         }
 
-        whDriver_ = FileDescriptor{checkedOpen(config_.whDriverDevice, O_RDWR | O_CLOEXEC | O_NONBLOCK)};
+        whDriver_ = FileDescriptor{checkedOpen(config_.whDriverDevice, O_RDWR | O_CLOEXEC)};
         configureWhDriverInterrupt(whDriver_.get(), spi5);
 
         whDriver_ = {};
-        whDriver_ = FileDescriptor{checkedOpen(config_.whDriverDevice, O_RDWR | O_CLOEXEC | O_NONBLOCK)};
+        whDriver_ = FileDescriptor{checkedOpen(config_.whDriverDevice, O_RDWR | O_CLOEXEC)};
         configureWhDriverInterrupt(whDriver_.get(), spi5);
     }
 
@@ -815,6 +854,7 @@ private:
         if (!valid) {
             return;
         }
+        ++receiverCounters.validPackets;
 
         auto& picCounters = packetCounters_[picIndex];
         updateSequence(picCounters.hasOutSequence, picCounters.lastOutSequence, outSequence, picCounters.outSequenceErrors);
@@ -827,6 +867,9 @@ private:
             ++receiverCounters.overflowErrors;
         }
 
+        for (std::uint8_t index = 0; index < nullPackets; ++index) {
+            enqueuePacketLocked(receiverIndex, nullPacket);
+        }
         enqueuePacketLocked(receiverIndex, packet.ts);
     }
 
@@ -870,6 +913,70 @@ private:
 
         std::lock_guard lock{packetCountersMutex_};
         return packetCounters_[index];
+    }
+
+    void clearReceiverPacketQueue(ReceiverId receiver)
+    {
+        const auto index = static_cast<std::size_t>(receiver.value - 1);
+        if (index >= packetQueues_.size()) {
+            return;
+        }
+
+        std::lock_guard lock{packetQueuesMutex_};
+        packetQueues_[index].clear();
+    }
+
+    void baselineValidPacketWatch(ReceiverId receiver, bool preserveSuppression)
+    {
+        const auto index = static_cast<std::size_t>(receiver.value - 1);
+        if (index >= validPacketWatch_.size()) {
+            return;
+        }
+
+        const auto suppressUntil = preserveSuppression ? validPacketWatch_[index].suppressUntil : std::chrono::steady_clock::time_point{};
+        const auto counters = countersFor(receiver);
+        auto& watch = validPacketWatch_[index];
+        watch.validPackets = counters.validPackets;
+        watch.lastProgress = std::chrono::steady_clock::now();
+        watch.suppressUntil = suppressUntil;
+        watch.seen = true;
+        watch.hasProgress = false;
+    }
+
+    bool validTransportFresh(ReceiverId receiver, std::uint64_t validPackets, std::chrono::steady_clock::time_point now)
+    {
+        const auto index = static_cast<std::size_t>(receiver.value - 1);
+        if (index >= validPacketWatch_.size()) {
+            return false;
+        }
+        auto& watch = validPacketWatch_[index];
+        if (!watch.seen) {
+            watch.seen = true;
+            watch.validPackets = validPackets;
+            watch.lastProgress = now;
+            return false;
+        }
+        if (validPackets != watch.validPackets) {
+            watch.validPackets = validPackets;
+            watch.lastProgress = now;
+            watch.suppressUntil = {};
+            watch.hasProgress = true;
+            return true;
+        }
+        if (!watch.hasProgress) {
+            if (now - watch.lastProgress > validTransportTimeout) {
+                watch.suppressUntil = now + falseLockSuppressDuration;
+            }
+            return false;
+        }
+        if (watch.suppressUntil > now) {
+            return false;
+        }
+        if (now - watch.lastProgress > validTransportTimeout) {
+            watch.suppressUntil = now + falseLockSuppressDuration;
+            return false;
+        }
+        return true;
     }
 
     void initialiseNim(std::uint8_t nimAddress, int index)
@@ -1234,6 +1341,14 @@ private:
     std::array<std::unordered_map<std::uint16_t, std::uint8_t>, 2> demodShadow_;
     std::array<PacketCounters, 4> packetCounters_;
     std::mutex packetCountersMutex_;
+    struct ValidPacketWatch {
+        std::uint64_t validPackets{};
+        std::chrono::steady_clock::time_point lastProgress{};
+        std::chrono::steady_clock::time_point suppressUntil{};
+        bool seen{};
+        bool hasProgress{};
+    };
+    std::array<ValidPacketWatch, 4> validPacketWatch_;
     std::array<std::deque<TransportPacket>, 4> packetQueues_;
     std::mutex packetQueuesMutex_;
     std::atomic_bool packetReaderRunning_{false};

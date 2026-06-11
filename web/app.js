@@ -56,9 +56,12 @@ const el = {
   muxRate: document.querySelector("#mux-rate"),
   videoBitrate: document.querySelector("#video-bitrate"),
   audioBitrate: document.querySelector("#audio-bitrate"),
+  mediaBackend: document.querySelector("#media-backend"),
   outputWidth: document.querySelector("#output-width"),
   outputHeight: document.querySelector("#output-height"),
   outputFrameRate: document.querySelector("#output-frame-rate"),
+  h264Profile: document.querySelector("#h264-profile"),
+  h264Level: document.querySelector("#h264-level"),
   plutoFec: document.querySelector("#pluto-fec"),
   hardwarePttEnabled: document.querySelector("#hardware-ptt-enabled"),
   hardwarePttChip: document.querySelector("#hardware-ptt-chip"),
@@ -396,9 +399,12 @@ function fillConfigForm() {
   el.muxRate.value = config.pluto?.muxRateKbps ?? 1200;
   el.videoBitrate.value = config.pluto?.videoBitrateKbps ?? 900;
   el.audioBitrate.value = config.pluto?.audioBitrateKbps ?? 96;
+  el.mediaBackend.value = config.media?.backend ?? "ffmpeg";
   el.outputWidth.value = config.pluto?.outputWidth ?? 1280;
   el.outputHeight.value = config.pluto?.outputHeight ?? 720;
   el.outputFrameRate.value = config.pluto?.outputFrameRate ?? 25;
+  el.h264Profile.value = config.pluto?.h264Profile ?? "main";
+  el.h264Level.value = config.pluto?.h264Level ?? "auto";
   el.plutoFec.value = config.pluto?.fec ?? "1/2";
   el.hardwarePttEnabled.checked = Boolean(config.hardwarePtt?.enabled);
   el.hardwarePttChip.value = config.hardwarePtt?.chip ?? "/dev/gpiochip0";
@@ -570,6 +576,8 @@ function readConfigForm() {
       outputWidth: clampedEvenValue(el.outputWidth, 1280, 320, 1920),
       outputHeight: clampedEvenValue(el.outputHeight, 720, 240, 1080),
       outputFrameRate: Math.max(1, Math.min(50, numberValue(el.outputFrameRate, 25))),
+      h264Profile: el.h264Profile.value,
+      h264Level: el.h264Level.value,
       fec: el.plutoFec.value,
       watermarkText: el.watermarkText.value,
     },
@@ -589,6 +597,9 @@ function readConfigForm() {
         enabled: el.rtmpEnabled.checked,
         url: el.rtmpUrl.value.trim(),
       },
+    },
+    media: {
+      backend: el.mediaBackend.value || "ffmpeg",
     },
     hardwarePtt: {
       enabled: el.hardwarePttEnabled.checked,
@@ -878,9 +889,12 @@ for (const input of [
   el.plutoFecMode,
   el.plutoConstellation,
   el.audioBitrate,
+  el.mediaBackend,
   el.outputWidth,
   el.outputHeight,
   el.outputFrameRate,
+  el.h264Profile,
+  el.h264Level,
   el.plutoFec,
   el.hardwarePttEnabled,
   el.hardwarePttChip,

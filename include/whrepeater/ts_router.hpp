@@ -22,6 +22,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <span>
 
@@ -41,9 +43,17 @@ public:
     void pump(NimController& nim, TsSink& sink);
 
 private:
-    static constexpr std::size_t maxPacketsPerPump{256};
+    static constexpr std::size_t maxPacketsPerPump{65536};
+    static constexpr std::size_t dumpBytes{20 * 1024 * 1024};
+    static inline const std::filesystem::path dumpTrigger{"/tmp/wh-repeater-dump-rx"};
+    static inline const std::filesystem::path dumpPath{"/tmp/wh-repeater-rx.ts"};
+
+    void maybeStartDump();
+    void dumpPacket(std::span<const std::byte> packet);
 
     std::optional<ActiveInput> active_;
+    std::ofstream dump_;
+    std::size_t dumpRemaining_{};
 };
 
 } // namespace whrepeater

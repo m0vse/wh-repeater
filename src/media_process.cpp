@@ -55,6 +55,10 @@ struct MessageHeader {
     std::uint32_t size{};
 };
 
+constexpr std::size_t transportPacketBytes{188};
+constexpr std::size_t maxTransportPayload{transportPacketBytes * 340};
+constexpr std::size_t maxBufferedTransport{transportPacketBytes * 65536};
+
 template <typename T>
 void appendPod(std::vector<std::byte>& output, const T& value)
 {
@@ -126,7 +130,12 @@ std::vector<std::byte> activePayload(const std::optional<ActiveInput>& input)
     }
     appendPod(payload, input->receiver.value);
     appendScanTarget(payload, input->target);
-    appendReceiverStatus(payload, input->status);
+    auto stableStatus = input->status;
+    stableStatus.merDb.reset();
+    stableStatus.dNumberDb.reset();
+    stableStatus.transportPackets = 0;
+    stableStatus.continuityErrors = 0;
+    appendReceiverStatus(payload, stableStatus);
     return payload;
 }
 
@@ -356,23 +365,37 @@ MediaProcess::~MediaProcess()
 void MediaProcess::select(std::optional<ActiveInput> input)
 {
     active_ = std::move(input);
-    (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::select), activePayload(active_), true);
+    auto payload = activePayload(active_);
+    if (lastSelectPayload_.has_value() && *lastSelectPayload_ == payload) {
+        return;
+    }
+    if (sendMessage(static_cast<std::uint32_t>(MediaMessage::select), payload, true)) {
+        lastSelectPayload_ = std::move(payload);
+    }
 }
 
 void MediaProcess::setBeaconAllowed(bool allowed)
 {
     beaconAllowed_ = allowed;
-    (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::beacon), boolPayload(allowed), true);
+    auto payload = boolPayload(allowed);
+    if (lastBeaconPayload_.has_value() && *lastBeaconPayload_ == payload) {
+        return;
+    }
+    if (sendMessage(static_cast<std::uint32_t>(MediaMessage::beacon), payload, true)) {
+        lastBeaconPayload_ = std::move(payload);
+    }
 }
 
 void MediaProcess::setAccessNotice(std::optional<std::string> notice)
 {
     accessNotice_ = std::move(notice);
-    if (!accessNotice_.has_value()) {
-        (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::notice), {}, true);
+    auto payload = accessNotice_.has_value() ? stringPayload(*accessNotice_) : std::vector<std::byte>{};
+    if (lastNoticePayload_.has_value() && *lastNoticePayload_ == payload) {
         return;
     }
-    (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::notice), stringPayload(*accessNotice_), true);
+    if (sendMessage(static_cast<std::uint32_t>(MediaMessage::notice), payload, true)) {
+        lastNoticePayload_ = std::move(payload);
+    }
 }
 
 void MediaProcess::playFallbackVideo(std::string path)
@@ -400,6 +423,7 @@ void MediaProcess::tick(std::chrono::steady_clock::time_point)
     } else {
         mode_ = MediaPipelineMode::idle;
     }
+    flushTransportBuffer(false);
     (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::tick), {}, false);
 }
 
@@ -408,7 +432,16 @@ void MediaProcess::write(std::span<const std::byte> packet)
     if (packet.empty()) {
         return;
     }
-    (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::transportStream), packet, false);
+    transportBuffer_.insert(transportBuffer_.end(), packet.begin(), packet.end());
+    flushTransportBuffer(false);
+    if (transportBuffer_.size() > maxBufferedTransport) {
+        const auto keepBytes = maxBufferedTransport / 2;
+        const auto alignedKeepBytes = keepBytes - (keepBytes % transportPacketBytes);
+        const auto eraseBytes = transportBuffer_.size() - alignedKeepBytes;
+        transportBuffer_.erase(transportBuffer_.begin(), transportBuffer_.begin() + static_cast<std::ptrdiff_t>(eraseBytes));
+        std::cerr << "wh-repeater: media transport backlog exceeded "
+                  << maxBufferedTransport << " bytes; dropped oldest queued TS\n";
+    }
 }
 
 MediaPipelineMode MediaProcess::mode() const
@@ -456,6 +489,9 @@ void MediaProcess::startChild()
     closeFd(sockets[1]);
     socket_ = sockets[0];
     childPid_ = static_cast<int>(pid);
+    lastSelectPayload_.reset();
+    lastBeaconPayload_.reset();
+    lastNoticePayload_.reset();
     std::cout << "media process started pid=" << childPid_ << '\n';
     replayState();
 }
@@ -557,17 +593,37 @@ bool MediaProcess::sendMessage(std::uint32_t type, std::span<const std::byte> pa
     return false;
 }
 
+void MediaProcess::flushTransportBuffer(bool essential)
+{
+    while (!transportBuffer_.empty()) {
+        const auto chunkSize = std::min(maxTransportPayload, transportBuffer_.size());
+        const std::span<const std::byte> chunk{transportBuffer_.data(), chunkSize};
+        if (!sendMessage(static_cast<std::uint32_t>(MediaMessage::transportStream), chunk, essential)) {
+            return;
+        }
+        transportBuffer_.erase(transportBuffer_.begin(), transportBuffer_.begin() + static_cast<std::ptrdiff_t>(chunkSize));
+    }
+}
+
 void MediaProcess::replayState()
 {
     if (socket_ < 0) {
         return;
     }
-    (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::select), activePayload(active_), true);
-    (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::beacon), boolPayload(beaconAllowed_), true);
+    auto select = activePayload(active_);
+    if (sendMessage(static_cast<std::uint32_t>(MediaMessage::select), select, true)) {
+        lastSelectPayload_ = std::move(select);
+    }
+    auto beacon = boolPayload(beaconAllowed_);
+    if (sendMessage(static_cast<std::uint32_t>(MediaMessage::beacon), beacon, true)) {
+        lastBeaconPayload_ = std::move(beacon);
+    }
+    std::vector<std::byte> notice;
     if (accessNotice_.has_value()) {
-        (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::notice), stringPayload(*accessNotice_), true);
-    } else {
-        (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::notice), {}, true);
+        notice = stringPayload(*accessNotice_);
+    }
+    if (sendMessage(static_cast<std::uint32_t>(MediaMessage::notice), notice, true)) {
+        lastNoticePayload_ = std::move(notice);
     }
     if (fallbackVideoPath_.has_value()) {
         (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::playFallbackVideo), stringPayload(*fallbackVideoPath_), true);

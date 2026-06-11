@@ -12,6 +12,11 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
     libswresample
     libswscale
 )
+pkg_check_modules(GSTREAMER QUIET IMPORTED_TARGET
+    gstreamer-1.0
+    gstreamer-app-1.0
+    gstreamer-video-1.0
+)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,6 +37,7 @@ add_executable(wh-repeater
     src/ident.cpp
     src/hardware_ptt.cpp
     src/i2c_bus_lock.cpp
+    src/gstreamer_backend.cpp
     src/media_process.cpp
     src/media_pipeline.cpp
     src/sd1_controller.cpp
@@ -39,6 +45,10 @@ add_executable(wh-repeater
 
 target_include_directories(wh-repeater PRIVATE include)
 target_link_libraries(wh-repeater PRIVATE PkgConfig::FFMPEG)
+if(GSTREAMER_FOUND)
+    target_compile_definitions(wh-repeater PRIVATE WH_REPEATER_HAVE_GSTREAMER=1)
+    target_link_libraries(wh-repeater PRIVATE PkgConfig::GSTREAMER)
+endif()
 
 if(WH_REPEATER_BUILD_SD1_TOOLS)
     add_executable(sd1-activation-diag

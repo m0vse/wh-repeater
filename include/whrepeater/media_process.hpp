@@ -26,6 +26,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace whrepeater {
 
@@ -53,6 +54,7 @@ private:
     void stopChild();
     void reapChild(bool restart);
     bool sendMessage(std::uint32_t type, std::span<const std::byte> payload, bool essential);
+    void flushTransportBuffer(bool essential);
     void replayState();
 
     RepeaterConfig config_;
@@ -63,6 +65,10 @@ private:
     MediaPipelineMode mode_{MediaPipelineMode::idle};
     int socket_{-1};
     int childPid_{-1};
+    std::vector<std::byte> transportBuffer_;
+    std::optional<std::vector<std::byte>> lastSelectPayload_;
+    std::optional<std::vector<std::byte>> lastBeaconPayload_;
+    std::optional<std::vector<std::byte>> lastNoticePayload_;
 };
 
 } // namespace whrepeater

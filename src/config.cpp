@@ -410,6 +410,22 @@ std::string parsePlutoSystem(std::string_view value)
     throw std::runtime_error{"pluto.system must be dvbs or dvbs2"};
 }
 
+std::string parseH264Profile(std::string_view value)
+{
+    if (value == "baseline" || value == "main" || value == "high") {
+        return std::string{value};
+    }
+    throw std::runtime_error{"pluto.h264Profile must be baseline, main, or high"};
+}
+
+std::string parseH264Level(std::string_view value)
+{
+    if (value == "auto" || value == "3" || value == "3.1" || value == "4") {
+        return std::string{value};
+    }
+    throw std::runtime_error{"pluto.h264Level must be auto, 3, 3.1, or 4"};
+}
+
 std::string parseClockTime(std::string_view value, std::string_view name)
 {
     if (value.size() != 5 || value[2] != ':'
@@ -692,6 +708,12 @@ RepeaterConfig configFromJson(std::string_view text)
         if (const auto* outputFrameRate = optionalMember(*pluto, "outputFrameRate")) {
             config.pluto.outputFrameRate = std::clamp(jsonUint32(*outputFrameRate, "pluto.outputFrameRate"), 1U, 50U);
         }
+        if (const auto* h264Profile = optionalMember(*pluto, "h264Profile")) {
+            config.pluto.h264Profile = parseH264Profile(jsonText(*h264Profile, "pluto.h264Profile"));
+        }
+        if (const auto* h264Level = optionalMember(*pluto, "h264Level")) {
+            config.pluto.h264Level = parseH264Level(jsonText(*h264Level, "pluto.h264Level"));
+        }
         if (const auto* fec = optionalMember(*pluto, "fec")) {
             const auto parsedFec = parseFec(jsonText(*fec, "pluto.fec"));
             if (parsedFec == "auto") {
@@ -750,6 +772,15 @@ RepeaterConfig configFromJson(std::string_view text)
             }
             if (const auto* url = optionalMember(*rtmp, "url")) {
                 config.streaming.rtmp.url = jsonText(*url, "streaming.rtmp.url");
+            }
+        }
+    }
+
+    if (const auto* media = optionalMember(root, "media")) {
+        if (const auto* backend = optionalMember(*media, "backend")) {
+            config.media.backend = jsonText(*backend, "media.backend");
+            if (config.media.backend != "ffmpeg" && config.media.backend != "gstreamer") {
+                throw std::runtime_error{"media.backend must be ffmpeg or gstreamer"};
             }
         }
     }
@@ -972,6 +1003,8 @@ std::string configToJson(const RepeaterConfig& config)
         << "    \"outputWidth\": " << config.pluto.outputWidth << ",\n"
         << "    \"outputHeight\": " << config.pluto.outputHeight << ",\n"
         << "    \"outputFrameRate\": " << config.pluto.outputFrameRate << ",\n"
+        << "    \"h264Profile\": " << jsonString(config.pluto.h264Profile) << ",\n"
+        << "    \"h264Level\": " << jsonString(config.pluto.h264Level) << ",\n"
         << "    \"fec\": " << jsonString(config.pluto.fec) << ",\n"
         << "    \"watermarkText\": " << jsonString(config.pluto.watermarkText) << "\n"
         << "  },\n"
@@ -998,6 +1031,9 @@ std::string configToJson(const RepeaterConfig& config)
         << "      \"enabled\": " << (config.streaming.rtmp.enabled ? "true" : "false") << ",\n"
         << "      \"url\": " << jsonString(config.streaming.rtmp.url) << "\n"
         << "    }\n"
+        << "  },\n"
+        << "  \"media\": {\n"
+        << "    \"backend\": " << jsonString(config.media.backend) << "\n"
         << "  },\n"
         << "  \"hardwarePtt\": {\n"
         << "    \"enabled\": " << (config.hardwarePtt.enabled ? "true" : "false") << ",\n"

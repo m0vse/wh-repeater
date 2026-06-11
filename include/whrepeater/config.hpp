@@ -52,6 +52,8 @@ struct PlutoConfig {
     std::uint32_t outputWidth{1280};
     std::uint32_t outputHeight{720};
     std::uint32_t outputFrameRate{25};
+    std::string h264Profile{"main"};
+    std::string h264Level{"auto"};
     std::string fec{"1/2"};
     std::string watermarkText{"WH Repeater"};
 };
@@ -134,6 +136,10 @@ struct AnalogueConfig {
     Sd1Config sd1;
 };
 
+struct MediaConfig {
+    std::string backend{"ffmpeg"};
+};
+
 struct ReceiverConfig {
     ReceiverId receiver;
     bool enabled{true};
@@ -151,6 +157,7 @@ struct RepeaterConfig {
     IdentConfig ident;
     HardwarePttConfig hardwarePtt;
     AnalogueConfig analogue;
+    MediaConfig media;
     std::chrono::milliseconds statusInterval{500};
     double minimumMerDb{2.0};
     double minimumDNumberDb{0.0};

@@ -18,6 +18,8 @@
 
 #include "whrepeater/media_pipeline.hpp"
 
+#include "whrepeater/gstreamer_backend.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -29,6 +31,7 @@
 #include <csignal>
 #include <ctime>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -38,11 +41,20 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <utility>
 #include <vector>
+
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+extern "C" {
+#include <gst/gst.h>
+#include <gst/app/gstappsrc.h>
+#include <gst/app/gstappsink.h>
+}
+#endif
 
 extern "C" {
 #include <libavdevice/avdevice.h>
@@ -71,6 +83,7 @@ constexpr int minimumOutputHeight{240};
 constexpr std::string_view slateFont{"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"};
 constexpr std::string_view clockFont{"/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"};
 constexpr int fallbackAudioSampleRate{48000};
+constexpr auto liveVideoAcquisitionTimeout = std::chrono::seconds{8};
 constexpr double pi{3.14159265358979323846};
 
 int outputWidth(const RepeaterConfig& config)
@@ -86,6 +99,73 @@ int outputHeight(const RepeaterConfig& config)
 int outputFrameRate(const RepeaterConfig& config)
 {
     return std::clamp(static_cast<int>(config.pluto.outputFrameRate), 1, 50);
+}
+
+std::string h264ProfileName(const RepeaterConfig& config)
+{
+    if (config.pluto.h264Profile == "baseline" || config.pluto.h264Profile == "high") {
+        return config.pluto.h264Profile;
+    }
+    return "main";
+}
+
+std::string h264LevelName(const RepeaterConfig& config)
+{
+    if (config.pluto.h264Level == "3" || config.pluto.h264Level == "3.1" || config.pluto.h264Level == "4") {
+        return config.pluto.h264Level;
+    }
+    if (outputHeight(config) > 720 || outputWidth(config) > 1280) {
+        return "4";
+    }
+    return "3.1";
+}
+
+int h264AvProfile(const RepeaterConfig& config)
+{
+    const auto profile = h264ProfileName(config);
+    if (profile == "baseline") {
+        return FF_PROFILE_H264_BASELINE;
+    }
+    if (profile == "high") {
+        return FF_PROFILE_H264_HIGH;
+    }
+    return FF_PROFILE_H264_MAIN;
+}
+
+int h264V4l2ProfileControl(const RepeaterConfig& config)
+{
+    const auto profile = h264ProfileName(config);
+    if (profile == "baseline") {
+        return 0;
+    }
+    if (profile == "high") {
+        return 4;
+    }
+    return 2;
+}
+
+int h264AvLevel(const RepeaterConfig& config)
+{
+    const auto level = h264LevelName(config);
+    if (level == "3") {
+        return 30;
+    }
+    if (level == "3.1") {
+        return 31;
+    }
+    return 40;
+}
+
+int h264V4l2LevelControl(const RepeaterConfig& config)
+{
+    const auto level = h264LevelName(config);
+    if (level == "3") {
+        return 8;
+    }
+    if (level == "3.1") {
+        return 9;
+    }
+    return 11;
 }
 
 int fallbackVideoBitrateKbps(const RepeaterConfig& config)
@@ -165,6 +245,16 @@ void fillBlue(AVFrame& frame)
         std::fill_n(frame.data[1] + y * frame.linesize[1], frame.width / 2, 240);
         std::fill_n(frame.data[2] + y * frame.linesize[2], frame.width / 2, 110);
     }
+}
+
+void normaliseVideoFrameProperties(AVFrame& frame)
+{
+    frame.sample_aspect_ratio = AVRational{1, 1};
+    frame.color_range = AVCOL_RANGE_UNSPECIFIED;
+    frame.colorspace = AVCOL_SPC_UNSPECIFIED;
+    frame.color_primaries = AVCOL_PRI_UNSPECIFIED;
+    frame.color_trc = AVCOL_TRC_UNSPECIFIED;
+    frame.chroma_location = AVCHROMA_LOC_UNSPECIFIED;
 }
 
 struct YuvColor {
@@ -466,6 +556,107 @@ std::string streamInfoText(const ActiveInput& input, std::string_view codec, int
     return text.str();
 }
 
+std::optional<std::string> dictionaryText(const AVDictionary* metadata, std::initializer_list<std::string_view> keys)
+{
+    if (metadata == nullptr) {
+        return std::nullopt;
+    }
+    for (const auto key : keys) {
+        if (const auto* entry = av_dict_get(metadata, std::string{key}.c_str(), nullptr, 0);
+            entry != nullptr && entry->value != nullptr && entry->value[0] != '\0') {
+            return std::string{entry->value};
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> programMetadataText(const AVFormatContext& inputFormat,
+                                               const AVStream& stream,
+                                               std::initializer_list<std::string_view> keys)
+{
+    for (unsigned int index = 0; index < inputFormat.nb_programs; ++index) {
+        const auto* program = inputFormat.programs[index];
+        if (program == nullptr) {
+            continue;
+        }
+        for (unsigned int streamIndex = 0; streamIndex < program->nb_stream_indexes; ++streamIndex) {
+            if (static_cast<int>(program->stream_index[streamIndex]) == stream.index) {
+                if (auto value = dictionaryText(program->metadata, keys); value.has_value()) {
+                    return value;
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::string streamInfoText(const ActiveInput& input,
+                           std::string_view codec,
+                           int width,
+                           int height,
+                           int frameRate,
+                           const AVFormatContext& inputFormat,
+                           const AVStream& stream)
+{
+    auto serviceName = programMetadataText(inputFormat, stream, {"service_name", "title"});
+    if (!serviceName.has_value()) {
+        serviceName = dictionaryText(inputFormat.metadata, {"service_name", "title"});
+    }
+    if (!serviceName.has_value()) {
+        serviceName = input.status.serviceName;
+    }
+    auto providerName = programMetadataText(inputFormat, stream, {"service_provider", "provider_name"});
+    if (!providerName.has_value()) {
+        providerName = dictionaryText(inputFormat.metadata, {"service_provider", "provider_name"});
+    }
+    auto networkName = programMetadataText(inputFormat, stream, {"network_name"});
+    if (!networkName.has_value()) {
+        networkName = dictionaryText(inputFormat.metadata, {"network_name"});
+    }
+
+    std::ostringstream text;
+    text << "RX" << input.receiver.value;
+    if (!input.target.label.empty()) {
+        text << " " << input.target.label;
+    }
+    text << "\n" << input.target.frequencyKhz << " kHz / " << input.target.symbolRateKs << " kS"
+         << " | " << codec << " " << width << "x" << height << " " << frameRate << " fps";
+    if (serviceName.has_value() && !serviceName->empty()) {
+        text << "\n" << *serviceName;
+        if (providerName.has_value() && !providerName->empty()) {
+            text << " | " << *providerName;
+        }
+    }
+    if (networkName.has_value() && !networkName->empty()) {
+        text << "\nNetwork: " << *networkName;
+    } else if (input.status.modulation.has_value() && !input.status.modulation->empty()) {
+        text << "\n" << *input.status.modulation;
+    }
+    return text.str();
+}
+
+std::string receivedStreamErrorText(const ActiveInput& input, std::string_view error)
+{
+    std::string shortError{error};
+    constexpr std::size_t maxErrorLength{72};
+    if (shortError.size() > maxErrorLength) {
+        shortError.resize(maxErrorLength - 3);
+        shortError += "...";
+    }
+
+    std::ostringstream text;
+    text << "RX" << input.receiver.value;
+    if (!input.target.label.empty()) {
+        text << " " << input.target.label;
+    }
+    text << "\n" << input.target.frequencyKhz << " kHz / " << input.target.symbolRateKs << " kS";
+    if (input.status.modulation.has_value() && !input.status.modulation->empty()) {
+        text << " | " << *input.status.modulation;
+    }
+    text << "\nReceived TS | " << (shortError.empty() ? "decode stopped" : shortError);
+    return text.str();
+}
+
 std::string streamInfoFilter(std::string_view text, int frameRate)
 {
     const auto lines = splitLines(text);
@@ -753,6 +944,7 @@ int plutoWritePacket(void* opaque, const std::uint8_t* buffer, int size)
 
 void configureEncoderContext(AVCodecContext& codec,
                              const AVFormatContext& format,
+                             const RepeaterConfig& config,
                              int width,
                              int height,
                              int frameRate,
@@ -769,6 +961,8 @@ void configureEncoderContext(AVCodecContext& codec,
     codec.bit_rate = static_cast<std::int64_t>(videoBitrateKbps) * 1000;
     codec.rc_max_rate = codec.bit_rate;
     codec.rc_buffer_size = static_cast<int>(codec.bit_rate / frameRate);
+    codec.profile = h264AvProfile(config);
+    codec.level = h264AvLevel(config);
     if ((format.oformat->flags & AVFMT_GLOBALHEADER) != 0) {
         codec.flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     }
@@ -776,6 +970,7 @@ void configureEncoderContext(AVCodecContext& codec,
 
 bool encoderOpenProbe(std::string_view encoderName,
                       const AVFormatContext& format,
+                      const RepeaterConfig& config,
                       int width,
                       int height,
                       int frameRate,
@@ -789,7 +984,7 @@ bool encoderOpenProbe(std::string_view encoderName,
         if (cachedResult.has_value()) {
             return *cachedResult;
         }
-        cachedResult = encoderOpenProbe("h264_v4l2m2m-once", format, width, height, frameRate, videoBitrateKbps, timeout);
+        cachedResult = encoderOpenProbe("h264_v4l2m2m-once", format, config, width, height, frameRate, videoBitrateKbps, timeout);
         return *cachedResult;
     }
     if (encoderName == "h264_v4l2m2m-once") {
@@ -814,7 +1009,7 @@ bool encoderOpenProbe(std::string_view encoderName,
         if (codec == nullptr) {
             _exit(2);
         }
-        configureEncoderContext(*codec, format, width, height, frameRate, videoBitrateKbps);
+        configureEncoderContext(*codec, format, config, width, height, frameRate, videoBitrateKbps);
         AVDictionary* options = nullptr;
         if (encoderName == "libx264") {
             av_dict_set(&options, "preset", "veryfast", 0);
@@ -848,137 +1043,499 @@ bool encoderOpenProbe(std::string_view encoderName,
 }
 
 EncoderOpenResult openH264Encoder(const AVFormatContext& format,
+                                  const RepeaterConfig& config,
                                   int width,
                                   int height,
                                   int frameRate,
                                   int videoBitrateKbps)
 {
-    constexpr std::array<std::string_view, 2> preferredEncoders{"h264_v4l2m2m", "libx264"};
     std::string errors;
 
-    for (const auto encoderName : preferredEncoders) {
-        const auto* encoder = avcodec_find_encoder_by_name(std::string{encoderName}.c_str());
-        if (encoder == nullptr) {
-            continue;
-        }
-        if (encoderName == "h264_v4l2m2m"
-            && !encoderOpenProbe(encoderName, format, width, height, frameRate, videoBitrateKbps, std::chrono::seconds{5})) {
-            errors += std::string{encoderName} + ": probe failed or timed out; ";
-            continue;
-        }
-
-        AVCodecContext* codec = avcodec_alloc_context3(encoder);
-        if (codec == nullptr) {
-            throw std::runtime_error{"allocate H.264 encoder failed"};
-        }
-        configureEncoderContext(*codec, format, width, height, frameRate, videoBitrateKbps);
-
-        AVDictionary* options = nullptr;
-        if (encoderName == "libx264") {
-            av_dict_set(&options, "preset", "veryfast", 0);
-            av_dict_set(&options, "tune", "zerolatency", 0);
-            const auto x264Params = "bframes=0:rc-lookahead=0:vbv-maxrate="
-                + std::to_string(videoBitrateKbps)
-                + ":vbv-bufsize="
-                + std::to_string(std::max(1, videoBitrateKbps / frameRate));
-            av_dict_set(&options, "x264-params", x264Params.c_str(), 0);
-        }
-
-        const auto status = avcodec_open2(codec, encoder, &options);
-        av_dict_free(&options);
-        if (status >= 0) {
-            return EncoderOpenResult{codec, encoder, std::string{encoderName}};
-        }
-
-        errors += std::string{encoderName} + ": " + avError(status) + "; ";
-        avcodec_free_context(&codec);
+    constexpr std::string_view encoderName{"h264_v4l2m2m"};
+    const auto* encoder = avcodec_find_encoder_by_name(std::string{encoderName}.c_str());
+    if (encoder == nullptr) {
+        throw std::runtime_error{"hardware H.264 encoder h264_v4l2m2m is not available"};
+    }
+    if (!encoderOpenProbe(encoderName, format, config, width, height, frameRate, videoBitrateKbps, std::chrono::seconds{5})) {
+        throw std::runtime_error{"hardware H.264 encoder h264_v4l2m2m probe failed or timed out"};
     }
 
-    const auto* encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
-    if (encoder != nullptr) {
-        AVCodecContext* codec = avcodec_alloc_context3(encoder);
-        if (codec == nullptr) {
-            throw std::runtime_error{"allocate H.264 encoder failed"};
-        }
-        configureEncoderContext(*codec, format, width, height, frameRate, videoBitrateKbps);
-        const auto status = avcodec_open2(codec, encoder, nullptr);
-        if (status >= 0) {
-            return EncoderOpenResult{codec, encoder, encoder->name == nullptr ? "h264" : encoder->name};
-        }
-        errors += std::string{"h264: "} + avError(status) + "; ";
-        avcodec_free_context(&codec);
+    AVCodecContext* codec = avcodec_alloc_context3(encoder);
+    if (codec == nullptr) {
+        throw std::runtime_error{"allocate hardware H.264 encoder failed"};
+    }
+    configureEncoderContext(*codec, format, config, width, height, frameRate, videoBitrateKbps);
+
+    AVDictionary* options = nullptr;
+    av_dict_set(&options, "repeat_sequence_header", "1", 0);
+    const auto status = avcodec_open2(codec, encoder, &options);
+    av_dict_free(&options);
+    if (status >= 0) {
+        return EncoderOpenResult{codec, encoder, std::string{encoderName}};
     }
 
-    throw std::runtime_error{"open H.264 encoder failed: " + errors};
-}
-
-EncoderOpenResult openSoftwareH264Encoder(const AVFormatContext& format,
-                                          int width,
-                                          int height,
-                                          int frameRate,
-                                          int videoBitrateKbps,
-                                          std::string_view preset = "veryfast")
-{
-    std::string errors;
-    const auto* encoder = avcodec_find_encoder_by_name("libx264");
-    if (encoder != nullptr) {
-        AVCodecContext* codec = avcodec_alloc_context3(encoder);
-        if (codec == nullptr) {
-            throw std::runtime_error{"allocate software H.264 encoder failed"};
-        }
-        configureEncoderContext(*codec, format, width, height, frameRate, videoBitrateKbps);
-        AVDictionary* options = nullptr;
-        av_dict_set(&options, "preset", std::string{preset}.c_str(), 0);
-        av_dict_set(&options, "tune", "zerolatency", 0);
-        const auto x264Params = "bframes=0:rc-lookahead=0:vbv-maxrate="
-            + std::to_string(videoBitrateKbps)
-            + ":vbv-bufsize="
-            + std::to_string(std::max(1, videoBitrateKbps / frameRate));
-        av_dict_set(&options, "x264-params", x264Params.c_str(), 0);
-        const auto status = avcodec_open2(codec, encoder, &options);
-        av_dict_free(&options);
-        if (status >= 0) {
-            return EncoderOpenResult{codec, encoder, "libx264"};
-        }
-        errors += std::string{"libx264: "} + avError(status) + "; ";
-        avcodec_free_context(&codec);
-    }
-
-    encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
-    if (encoder != nullptr && (encoder->name == nullptr || std::string_view{encoder->name} != "h264_v4l2m2m")) {
-        AVCodecContext* codec = avcodec_alloc_context3(encoder);
-        if (codec == nullptr) {
-            throw std::runtime_error{"allocate software H.264 encoder failed"};
-        }
-        configureEncoderContext(*codec, format, width, height, frameRate, videoBitrateKbps);
-        const auto status = avcodec_open2(codec, encoder, nullptr);
-        if (status >= 0) {
-            return EncoderOpenResult{codec, encoder, encoder->name == nullptr ? "h264" : encoder->name};
-        }
-        errors += std::string{"h264: "} + avError(status) + "; ";
-        avcodec_free_context(&codec);
-    }
-
-    throw std::runtime_error{"open software H.264 encoder failed: " + errors};
+    errors += std::string{encoderName} + ": " + avError(status) + "; ";
+    avcodec_free_context(&codec);
+    throw std::runtime_error{"open hardware H.264 encoder failed: " + errors};
 }
 
 EncoderOpenResult openFallbackEncoder(const RepeaterConfig& config, const AVFormatContext& format, int frameRate, int videoBitrateKbps)
 {
-    return openH264Encoder(format, outputWidth(config), outputHeight(config), frameRate, videoBitrateKbps);
+    return openH264Encoder(format, config, outputWidth(config), outputHeight(config), frameRate, videoBitrateKbps);
 }
+
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+struct GstObjectDeleter {
+    void operator()(GstObject* object) const
+    {
+        if (object != nullptr) {
+            gst_object_unref(object);
+        }
+    }
+};
+
+struct GstElementStateDeleter {
+    void operator()(GstElement* element) const
+    {
+        if (element != nullptr) {
+            gst_element_set_state(element, GST_STATE_NULL);
+            gst_object_unref(element);
+        }
+    }
+};
+
+struct GstSampleDeleter {
+    void operator()(GstSample* sample) const
+    {
+        if (sample != nullptr) {
+            gst_sample_unref(sample);
+        }
+    }
+};
+
+struct GstMessageDeleter {
+    void operator()(GstMessage* message) const
+    {
+        if (message != nullptr) {
+            gst_message_unref(message);
+        }
+    }
+};
+
+using GstElementPtr = std::unique_ptr<GstElement, GstElementStateDeleter>;
+using GstObjectPtr = std::unique_ptr<GstObject, GstObjectDeleter>;
+using GstSamplePtr = std::unique_ptr<GstSample, GstSampleDeleter>;
+using GstMessagePtr = std::unique_ptr<GstMessage, GstMessageDeleter>;
+
+std::string gstQuoted(std::string_view value)
+{
+    std::string output{"\""};
+    for (const auto ch : value) {
+        if (ch == '\\' || ch == '"') {
+            output.push_back('\\');
+        }
+        output.push_back(ch);
+    }
+    output.push_back('"');
+    return output;
+}
+
+void requireGstElement(std::string_view name)
+{
+    GstElementFactory* factory = gst_element_factory_find(std::string{name}.c_str());
+    if (factory == nullptr) {
+        throw std::runtime_error{"GStreamer element not available: " + std::string{name}};
+    }
+    gst_object_unref(factory);
+}
+
+bool gstElementAvailable(std::string_view name)
+{
+    GstElementFactory* factory = gst_element_factory_find(std::string{name}.c_str());
+    if (factory == nullptr) {
+        return false;
+    }
+    gst_object_unref(factory);
+    return true;
+}
+
+bool gstV4l2H264EncoderUsable(const RepeaterConfig& config)
+{
+    static std::optional<bool> usable;
+    if (usable.has_value()) {
+        return *usable;
+    }
+    if (!gstElementAvailable("v4l2h264enc")) {
+        usable = false;
+        return *usable;
+    }
+
+    std::ostringstream selfTestPipeline;
+    selfTestPipeline
+        << "videotestsrc num-buffers=2 is-live=false "
+        << "! video/x-raw,format=I420,width=" << outputWidth(config)
+        << ",height=" << outputHeight(config)
+        << ",framerate=" << outputFrameRate(config) << "/1 "
+        << "! v4l2h264enc extra-controls="
+        << gstQuoted("controls,h264_profile=" + std::to_string(h264V4l2ProfileControl(config))
+                     + ",h264_level=" + std::to_string(h264V4l2LevelControl(config)))
+        << " ! video/x-h264,level=(string)" << h264LevelName(config)
+        << ",profile=(string)" << h264ProfileName(config) << " "
+        << "! h264parse "
+        << "! fakesink sync=false";
+    const auto pipelineText = selfTestPipeline.str();
+    GError* rawError{};
+    GstElement* rawPipeline = gst_parse_launch(pipelineText.c_str(), &rawError);
+    if (rawError != nullptr || rawPipeline == nullptr) {
+        if (rawError != nullptr) {
+            g_error_free(rawError);
+        }
+        if (rawPipeline != nullptr) {
+            gst_element_set_state(rawPipeline, GST_STATE_NULL);
+            gst_object_unref(rawPipeline);
+        }
+        usable = false;
+        return *usable;
+    }
+    GstElementPtr pipeline{rawPipeline};
+    GstBus* rawBus = gst_element_get_bus(pipeline.get());
+    if (rawBus == nullptr) {
+        usable = false;
+        return *usable;
+    }
+    GstObjectPtr busObject{GST_OBJECT(rawBus)};
+
+    if (gst_element_set_state(pipeline.get(), GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
+        usable = false;
+        return *usable;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    usable = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        GstMessagePtr message{gst_bus_timed_pop_filtered(rawBus,
+                                                         200 * GST_MSECOND,
+                                                         static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS))};
+        if (!message) {
+            continue;
+        }
+        if (GST_MESSAGE_TYPE(message.get()) == GST_MESSAGE_EOS) {
+            usable = true;
+            break;
+        }
+        if (GST_MESSAGE_TYPE(message.get()) == GST_MESSAGE_ERROR) {
+            GError* error{};
+            gchar* debug{};
+            gst_message_parse_error(message.get(), &error, &debug);
+            std::cerr << "wh-repeater: GStreamer v4l2h264enc self-test failed: "
+                      << (error != nullptr && error->message != nullptr ? error->message : "unknown error");
+            if (debug != nullptr && debug[0] != '\0') {
+                std::cerr << " (" << debug << ")";
+            }
+            std::cerr << '\n';
+            if (error != nullptr) {
+                g_error_free(error);
+            }
+            g_free(debug);
+            break;
+        }
+    }
+
+    if (!*usable) {
+        std::cerr << "wh-repeater: GStreamer v4l2h264enc is registered but not usable; using OpenH264 software encoder\n";
+    }
+    return *usable;
+}
+
+std::string gstH264EncoderElement(const RepeaterConfig& config, int frameRate, int videoBitrate)
+{
+    const auto gop = std::max(1, frameRate * 2);
+    if (gstV4l2H264EncoderUsable(config)) {
+        std::ostringstream encoder;
+        encoder
+            << "v4l2h264enc extra-controls="
+            << gstQuoted("controls,video_bitrate_mode=1,video_bitrate=" + std::to_string(videoBitrate)
+                         + ",h264_i_frame_period=" + std::to_string(gop)
+                         + ",repeat_sequence_header=1,h264_profile=" + std::to_string(h264V4l2ProfileControl(config))
+                         + ",h264_level=" + std::to_string(h264V4l2LevelControl(config)))
+            << " ! video/x-h264,level=(string)" << h264LevelName(config)
+            << ",profile=(string)" << h264ProfileName(config) << " ";
+        return encoder.str();
+    }
+
+    throw std::runtime_error{"GStreamer hardware H.264 encoder is not usable; software encode is disabled"};
+}
+
+std::string gstRawOutputPipeline(const RepeaterConfig& config)
+{
+    configureGStreamerRuntime();
+    requireGstElement("appsrc");
+    requireGstElement("queue");
+    requireGstElement("h264parse");
+    requireGstElement("mpegtsmux");
+    requireGstElement("appsink");
+    requireGstElement("audioconvert");
+    requireGstElement("audioresample");
+    requireGstElement("avenc_aac");
+    requireGstElement("aacparse");
+    if (config.streaming.rtmp.enabled && !config.streaming.rtmp.url.empty()) {
+        requireGstElement("tee");
+        requireGstElement("flvmux");
+        if (!gstElementAvailable("rtmp2sink") && !gstElementAvailable("rtmpsink")) {
+            throw std::runtime_error{"GStreamer RTMP sink not available"};
+        }
+    }
+
+    const auto width = outputWidth(config);
+    const auto height = outputHeight(config);
+    const auto frameRate = outputFrameRate(config);
+    const auto videoBitrate = std::max(250, static_cast<int>(fallbackVideoBitrateKbps(config))) * 1000;
+    const auto audioBitrate = std::max(16000, static_cast<int>(config.pluto.audioBitrateKbps) * 1000);
+    const auto muxBitrate = std::max(250000, static_cast<int>(config.pluto.muxRateKbps) * 1000);
+    const auto encoder = gstH264EncoderElement(config, frameRate, videoBitrate);
+
+    std::ostringstream pipeline;
+    pipeline
+        << "mpegtsmux name=mux alignment=7 bitrate=" << muxBitrate << " pat-interval=9000 pmt-interval=9000 pcr-interval=3600 "
+        << "! appsink name=ts_sink emit-signals=false sync=false max-buffers=16 drop=false "
+        << "appsrc name=video_src is-live=true format=time do-timestamp=false block=true "
+        << "caps=video/x-raw,format=I420,width=" << width << ",height=" << height << ",framerate=" << frameRate << "/1 "
+        << "! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 "
+        << "! " << encoder;
+
+    if (config.streaming.rtmp.enabled && !config.streaming.rtmp.url.empty()) {
+        pipeline
+            << "! tee name=video_t "
+            << "video_t. ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 "
+            << "! h264parse config-interval=-1 "
+            << "! video/x-h264,stream-format=byte-stream,alignment=au ! mux. ";
+    } else {
+        pipeline
+            << "! h264parse config-interval=-1 "
+            << "! video/x-h264,stream-format=byte-stream,alignment=au ! mux. ";
+    }
+
+    pipeline
+        << "appsrc name=audio_src is-live=true format=time do-timestamp=false block=true "
+        << "caps=audio/x-raw,format=F32LE,layout=interleaved,rate=48000,channels=1 "
+        << "! queue max-size-buffers=16 max-size-bytes=0 max-size-time=0 "
+        << "! audioconvert ! audioresample "
+        << "! avenc_aac bitrate=" << audioBitrate << " ";
+
+    if (config.streaming.rtmp.enabled && !config.streaming.rtmp.url.empty()) {
+        const auto rtmpElement = gstElementAvailable("rtmp2sink") ? "rtmp2sink" : "rtmpsink";
+        pipeline
+            << "! tee name=audio_t "
+            << "audio_t. ! queue max-size-buffers=16 max-size-bytes=0 max-size-time=0 "
+            << "! aacparse ! audio/mpeg,mpegversion=4,stream-format=adts ! mux. "
+            << "flvmux name=flv streamable=true "
+            << "! " << rtmpElement << " location=" << gstQuoted(config.streaming.rtmp.url) << " sync=false async=false "
+            << "video_t. ! queue leaky=downstream max-size-buffers=30 max-size-bytes=0 max-size-time=0 "
+            << "! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au ! flv. "
+            << "audio_t. ! queue leaky=downstream max-size-buffers=50 max-size-bytes=0 max-size-time=0 "
+            << "! aacparse ! audio/mpeg,mpegversion=4,stream-format=raw ! flv. ";
+    } else {
+        pipeline << "! aacparse ! audio/mpeg,mpegversion=4,stream-format=adts ! mux. ";
+    }
+
+    return pipeline.str();
+}
+
+std::string gstLiveTsPipeline(const RepeaterConfig& config)
+{
+    configureGStreamerRuntime();
+    requireGstElement("appsrc");
+    requireGstElement("tsdemux");
+    requireGstElement("decodebin");
+    requireGstElement("queue");
+    requireGstElement("videoconvert");
+    requireGstElement("videoscale");
+    requireGstElement("videorate");
+    requireGstElement("textoverlay");
+    requireGstElement("h264parse");
+    requireGstElement("mpegtsmux");
+    requireGstElement("appsink");
+    requireGstElement("audioconvert");
+    requireGstElement("audioresample");
+    requireGstElement("avenc_aac");
+    requireGstElement("aacparse");
+    if (config.streaming.rtmp.enabled && !config.streaming.rtmp.url.empty()) {
+        requireGstElement("tee");
+        requireGstElement("flvmux");
+        if (!gstElementAvailable("rtmp2sink") && !gstElementAvailable("rtmpsink")) {
+            throw std::runtime_error{"GStreamer RTMP sink not available"};
+        }
+    }
+
+    const auto width = outputWidth(config);
+    const auto height = outputHeight(config);
+    const auto frameRate = outputFrameRate(config);
+    const auto videoBitrate = std::max(250, static_cast<int>(config.pluto.videoBitrateKbps)) * 1000;
+    const auto audioBitrate = std::max(16000, static_cast<int>(config.pluto.audioBitrateKbps) * 1000);
+    const auto muxBitrate = std::max(250000, static_cast<int>(config.pluto.muxRateKbps) * 1000);
+    const auto encoder = gstH264EncoderElement(config, frameRate, videoBitrate);
+
+    std::ostringstream pipeline;
+    pipeline
+        << "appsrc name=ts_src is-live=true format=bytes do-timestamp=false block=true "
+        << "caps=video/mpegts,systemstream=true,packetsize=188 "
+        << "! queue max-size-buffers=128 max-size-bytes=0 max-size-time=0 "
+        << "! tsdemux name=demux "
+        << "mpegtsmux name=mux alignment=7 bitrate=" << muxBitrate << " pat-interval=9000 pmt-interval=9000 pcr-interval=3600 "
+        << "! appsink name=ts_sink emit-signals=false sync=false max-buffers=16 drop=false "
+        << "demux. ! queue max-size-buffers=64 max-size-bytes=0 max-size-time=0 "
+        << "! decodebin ! videoconvert ! videoscale add-borders=true ! videorate "
+        << "! video/x-raw,format=I420,width=" << width << ",height=" << height << ",framerate=" << frameRate << "/1 "
+        << "! textoverlay text=" << gstQuoted(identText(config))
+        << " halignment=left valignment=top shaded-background=true font-desc=" << gstQuoted("Inter Semi Bold 22")
+        << "! " << encoder;
+
+    if (config.streaming.rtmp.enabled && !config.streaming.rtmp.url.empty()) {
+        pipeline
+            << "! tee name=video_t "
+            << "video_t. ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 "
+            << "! h264parse config-interval=-1 "
+            << "! video/x-h264,stream-format=byte-stream,alignment=au ! mux. ";
+    } else {
+        pipeline
+            << "! h264parse config-interval=-1 "
+            << "! video/x-h264,stream-format=byte-stream,alignment=au ! mux. ";
+    }
+
+    pipeline
+        << "demux. ! queue max-size-buffers=64 max-size-bytes=0 max-size-time=0 "
+        << "! decodebin ! audioconvert ! audioresample "
+        << "! audio/x-raw,rate=48000,channels=1 "
+        << "! avenc_aac bitrate=" << audioBitrate << " ";
+
+    if (config.streaming.rtmp.enabled && !config.streaming.rtmp.url.empty()) {
+        const auto rtmpElement = gstElementAvailable("rtmp2sink") ? "rtmp2sink" : "rtmpsink";
+        pipeline
+            << "! tee name=audio_t "
+            << "audio_t. ! queue max-size-buffers=16 max-size-bytes=0 max-size-time=0 "
+            << "! aacparse ! audio/mpeg,mpegversion=4,stream-format=adts ! mux. "
+            << "flvmux name=flv streamable=true "
+            << "! " << rtmpElement << " location=" << gstQuoted(config.streaming.rtmp.url) << " sync=false async=false "
+            << "video_t. ! queue leaky=downstream max-size-buffers=30 max-size-bytes=0 max-size-time=0 "
+            << "! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au ! flv. "
+            << "audio_t. ! queue leaky=downstream max-size-buffers=50 max-size-bytes=0 max-size-time=0 "
+            << "! aacparse ! audio/mpeg,mpegversion=4,stream-format=raw ! flv. ";
+    } else {
+        pipeline << "! aacparse ! audio/mpeg,mpegversion=4,stream-format=adts ! mux. ";
+    }
+
+    return pipeline.str();
+}
+
+std::string gstAnalogueCapturePipeline(const RepeaterConfig& config)
+{
+    configureGStreamerRuntime();
+    requireGstElement("v4l2src");
+    requireGstElement("audiotestsrc");
+    requireGstElement("queue");
+    requireGstElement("videoconvert");
+    requireGstElement("videoscale");
+    requireGstElement("videorate");
+    requireGstElement("textoverlay");
+    requireGstElement("h264parse");
+    requireGstElement("mpegtsmux");
+    requireGstElement("appsink");
+    requireGstElement("audioconvert");
+    requireGstElement("audioresample");
+    requireGstElement("avenc_aac");
+    requireGstElement("aacparse");
+    if (config.streaming.rtmp.enabled && !config.streaming.rtmp.url.empty()) {
+        requireGstElement("tee");
+        requireGstElement("flvmux");
+        if (!gstElementAvailable("rtmp2sink") && !gstElementAvailable("rtmpsink")) {
+            throw std::runtime_error{"GStreamer RTMP sink not available"};
+        }
+    }
+
+    const auto& capture = config.analogue.capture;
+    const auto width = outputWidth(config);
+    const auto height = outputHeight(config);
+    const auto frameRate = outputFrameRate(config);
+    const auto captureRateNum = std::max(1U, capture.captureFrameRateNumerator);
+    const auto captureRateDen = std::max(1U, capture.captureFrameRateDenominator);
+    const auto videoBitrate = std::max(250, static_cast<int>(config.pluto.videoBitrateKbps)) * 1000;
+    const auto audioBitrate = std::max(16000, static_cast<int>(config.pluto.audioBitrateKbps) * 1000);
+    const auto muxBitrate = std::max(250000, static_cast<int>(config.pluto.muxRateKbps) * 1000);
+    const auto encoder = gstH264EncoderElement(config, frameRate, videoBitrate);
+
+    std::ostringstream pipeline;
+    pipeline
+        << "mpegtsmux name=mux alignment=7 bitrate=" << muxBitrate << " pat-interval=9000 pmt-interval=9000 pcr-interval=3600 "
+        << "! appsink name=ts_sink emit-signals=false sync=false max-buffers=16 drop=false "
+        << "v4l2src device=" << gstQuoted(capture.captureDevice) << " do-timestamp=true "
+        << "! video/x-raw,width=" << capture.captureWidth << ",height=" << capture.captureHeight
+        << ",framerate=" << captureRateNum << "/" << captureRateDen << " "
+        << "! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 "
+        << "! videoconvert ! videoscale add-borders=true ! videorate "
+        << "! video/x-raw,format=I420,width=" << width << ",height=" << height << ",framerate=" << frameRate << "/1 "
+        << "! textoverlay text=" << gstQuoted(identText(config))
+        << " halignment=left valignment=top shaded-background=true font-desc=" << gstQuoted("Inter Semi Bold 22")
+        << "! " << encoder;
+
+    if (config.streaming.rtmp.enabled && !config.streaming.rtmp.url.empty()) {
+        pipeline
+            << "! tee name=video_t "
+            << "video_t. ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 "
+            << "! h264parse config-interval=-1 "
+            << "! video/x-h264,stream-format=byte-stream,alignment=au ! mux. ";
+    } else {
+        pipeline
+            << "! h264parse config-interval=-1 "
+            << "! video/x-h264,stream-format=byte-stream,alignment=au ! mux. ";
+    }
+
+    pipeline
+        << "audiotestsrc wave=silence is-live=true "
+        << "! audio/x-raw,format=F32LE,layout=interleaved,rate=48000,channels=1 "
+        << "! queue max-size-buffers=16 max-size-bytes=0 max-size-time=0 "
+        << "! audioconvert ! audioresample "
+        << "! avenc_aac bitrate=" << audioBitrate << " ";
+
+    if (config.streaming.rtmp.enabled && !config.streaming.rtmp.url.empty()) {
+        const auto rtmpElement = gstElementAvailable("rtmp2sink") ? "rtmp2sink" : "rtmpsink";
+        pipeline
+            << "! tee name=audio_t "
+            << "audio_t. ! queue max-size-buffers=16 max-size-bytes=0 max-size-time=0 "
+            << "! aacparse ! audio/mpeg,mpegversion=4,stream-format=adts ! mux. "
+            << "flvmux name=flv streamable=true "
+            << "! " << rtmpElement << " location=" << gstQuoted(config.streaming.rtmp.url) << " sync=false async=false "
+            << "video_t. ! queue leaky=downstream max-size-buffers=30 max-size-bytes=0 max-size-time=0 "
+            << "! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au ! flv. "
+            << "audio_t. ! queue leaky=downstream max-size-buffers=50 max-size-bytes=0 max-size-time=0 "
+            << "! aacparse ! audio/mpeg,mpegversion=4,stream-format=raw ! flv. ";
+    } else {
+        pipeline << "! aacparse ! audio/mpeg,mpegversion=4,stream-format=adts ! mux. ";
+    }
+
+    return pipeline.str();
+}
+#endif
 
 class BlockingTsInput {
 public:
     void append(std::span<const std::byte> data)
     {
-        {
-            std::lock_guard lock{mutex_};
-            if (buffer_.size() + data.size() > maxBufferedBytes) {
-                buffer_.clear();
+        std::size_t offset = 0;
+        while (offset < data.size()) {
+            const auto chunkSize = std::min(maxAppendChunk, data.size() - offset);
+            std::unique_lock lock{mutex_};
+            ready_.wait(lock, [this, chunkSize] {
+                return stopped_ || buffer_.size() + chunkSize <= maxBufferedBytes;
+            });
+            if (stopped_) {
+                return;
             }
-            buffer_.insert(buffer_.end(), data.begin(), data.end());
+            buffer_.insert(buffer_.end(), data.begin() + static_cast<std::ptrdiff_t>(offset),
+                           data.begin() + static_cast<std::ptrdiff_t>(offset + chunkSize));
+            offset += chunkSize;
+            lock.unlock();
+            ready_.notify_one();
         }
-        ready_.notify_one();
     }
 
     int read(std::uint8_t* buffer, int size)
@@ -996,6 +1553,8 @@ public:
             buffer[index] = static_cast<std::uint8_t>(buffer_.front());
             buffer_.pop_front();
         }
+        lock.unlock();
+        ready_.notify_all();
         return static_cast<int>(count);
     }
 
@@ -1009,7 +1568,8 @@ public:
     }
 
 private:
-    static constexpr std::size_t maxBufferedBytes{4 * 1024 * 1024};
+    static constexpr std::size_t maxBufferedBytes{32 * 1024 * 1024};
+    static constexpr std::size_t maxAppendChunk{1 * 1024 * 1024};
     std::mutex mutex_;
     std::condition_variable ready_;
     std::deque<std::byte> buffer_;
@@ -1364,6 +1924,65 @@ int evenDimension(int value)
     return std::max(16, value & ~1);
 }
 
+std::vector<std::uint8_t> extractAnnexBH264ParameterSets(const std::uint8_t* data, int size)
+{
+    std::vector<std::uint8_t> result;
+    if (data == nullptr || size <= 0) {
+        return result;
+    }
+
+    auto startCodeAt = [data, size](int offset, int& prefixSize) {
+        if (offset + 3 <= size && data[offset] == 0 && data[offset + 1] == 0 && data[offset + 2] == 1) {
+            prefixSize = 3;
+            return true;
+        }
+        if (offset + 4 <= size && data[offset] == 0 && data[offset + 1] == 0 && data[offset + 2] == 0 && data[offset + 3] == 1) {
+            prefixSize = 4;
+            return true;
+        }
+        return false;
+    };
+
+    auto findStartCode = [&startCodeAt, size](int from, int& prefixSize) {
+        for (int index = std::max(0, from); index + 3 <= size; ++index) {
+            if (startCodeAt(index, prefixSize)) {
+                return index;
+            }
+        }
+        return -1;
+    };
+
+    bool haveSps = false;
+    bool havePps = false;
+    int prefixSize = 0;
+    for (int start = findStartCode(0, prefixSize); start >= 0;) {
+        const auto nalStart = start + prefixSize;
+        int nextPrefix = 0;
+        const auto nextStart = findStartCode(nalStart, nextPrefix);
+        const auto nalEnd = nextStart >= 0 ? nextStart : size;
+        if (nalStart < nalEnd) {
+            const auto nalType = data[nalStart] & 0x1f;
+            if ((nalType == 7 && !haveSps) || (nalType == 8 && !havePps)) {
+                static constexpr std::array<std::uint8_t, 4> annexBPrefix{0, 0, 0, 1};
+                result.insert(result.end(), annexBPrefix.begin(), annexBPrefix.end());
+                result.insert(result.end(), data + nalStart, data + nalEnd);
+                haveSps = haveSps || nalType == 7;
+                havePps = havePps || nalType == 8;
+                if (haveSps && havePps) {
+                    break;
+                }
+            }
+        }
+        start = nextStart;
+        prefixSize = nextPrefix;
+    }
+
+    if (!haveSps || !havePps) {
+        result.clear();
+    }
+    return result;
+}
+
 class PersistentRtmpMuxer {
 public:
     explicit PersistentRtmpMuxer(const RepeaterConfig& config)
@@ -1401,6 +2020,9 @@ public:
         }
         videoTimeBase_ = codec.time_base;
         videoConfigured_ = true;
+        std::cout << "media pipeline configured RTMP H.264 video at "
+                  << codec.width << 'x' << codec.height
+                  << " extradata=" << videoCodecParameters_->extradata_size << " bytes\n";
         openLocked();
     }
 
@@ -1499,6 +2121,11 @@ private:
         if (!enabled() || !videoConfigured_ || headerWritten_) {
             return;
         }
+        if (videoCodecParameters_ != nullptr
+            && videoCodecParameters_->codec_id == AV_CODEC_ID_H264
+            && videoCodecParameters_->extradata_size <= 0) {
+            return;
+        }
         if (std::chrono::steady_clock::now() < nextConnectAttempt_) {
             return;
         }
@@ -1566,6 +2193,9 @@ private:
         if (!enabled()) {
             return;
         }
+        if (video) {
+            seedH264ExtradataLocked(packet);
+        }
         if (!headerWritten_) {
             openLocked();
         }
@@ -1599,6 +2229,18 @@ private:
             lastDts = copy->pts;
         }
         copy->stream_index = stream->index;
+        auto& logged = video ? loggedFirstVideoPacket_ : loggedFirstAudioPacket_;
+        if (!logged) {
+            std::cout << "media pipeline writing first RTMP " << (video ? "video" : "audio")
+                      << " packet size=" << copy->size
+                      << " pts=" << copy->pts
+                      << " dts=" << copy->dts;
+            if (video) {
+                std::cout << " key=" << ((copy->flags & AV_PKT_FLAG_KEY) != 0 ? "yes" : "no");
+            }
+            std::cout << '\n';
+            logged = true;
+        }
         const auto status = av_interleaved_write_frame(rtmpFormat_, copy.get());
         if (status < 0) {
             std::cerr << "wh-repeater: RTMP " << (video ? "video" : "audio")
@@ -1606,6 +2248,33 @@ private:
             closeLocked(false);
             scheduleReconnect();
         }
+    }
+
+    void seedH264ExtradataLocked(const AVPacket* packet)
+    {
+        if (packet == nullptr
+            || videoCodecParameters_ == nullptr
+            || videoCodecParameters_->codec_id != AV_CODEC_ID_H264
+            || videoCodecParameters_->extradata_size > 0
+            || (packet->flags & AV_PKT_FLAG_KEY) == 0) {
+            return;
+        }
+
+        const auto extradata = extractAnnexBH264ParameterSets(packet->data, packet->size);
+        if (extradata.empty()) {
+            return;
+        }
+        auto* buffer = static_cast<std::uint8_t*>(av_mallocz(extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+        if (buffer == nullptr) {
+            std::cerr << "wh-repeater: allocate RTMP H.264 parameter sets failed\n";
+            return;
+        }
+        std::memcpy(buffer, extradata.data(), extradata.size());
+        av_freep(&videoCodecParameters_->extradata);
+        videoCodecParameters_->extradata = buffer;
+        videoCodecParameters_->extradata_size = static_cast<int>(extradata.size());
+        std::cout << "media pipeline seeded RTMP H.264 parameter sets from keyframe extradata="
+                  << videoCodecParameters_->extradata_size << " bytes\n";
     }
 
     void markConnectFailed(std::string_view operation, int status)
@@ -1633,6 +2302,8 @@ private:
         headerWritten_ = false;
         videoStream_ = nullptr;
         audioStream_ = nullptr;
+        loggedFirstVideoPacket_ = false;
+        loggedFirstAudioPacket_ = false;
         if (rtmpFormat_ != nullptr) {
             if ((rtmpFormat_->oformat->flags & AVFMT_NOFILE) == 0 && rtmpFormat_->pb != nullptr) {
                 avio_closep(&rtmpFormat_->pb);
@@ -1659,6 +2330,27 @@ private:
     bool videoConfigured_{false};
     bool audioConfigured_{false};
     bool headerWritten_{false};
+    bool loggedFirstVideoPacket_{false};
+    bool loggedFirstAudioPacket_{false};
+};
+
+class EncodedOutputSink {
+public:
+    virtual ~EncodedOutputSink() = default;
+    [[nodiscard]] virtual AVPixelFormat pixelFormat() const = 0;
+    [[nodiscard]] virtual int width() const = 0;
+    [[nodiscard]] virtual int height() const = 0;
+    [[nodiscard]] int frameRate() const
+    {
+        return std::max(1, frameRateValue());
+    }
+    [[nodiscard]] virtual int frameRateValue() const = 0;
+    [[nodiscard]] virtual AVCodecContext* audioCodec() const = 0;
+    [[nodiscard]] virtual std::int64_t nextVideoPts() const = 0;
+    [[nodiscard]] virtual std::int64_t nextAudioPts() const = 0;
+    virtual void setStreamInfo(std::optional<std::string> streamInfo) = 0;
+    virtual void submitVideoFrame(AVFrame* frame, std::string_view source) = 0;
+    virtual void submitAudioFrame(AVFrame* frame, std::string_view source) = 0;
 };
 
 class H264OutputMuxer {
@@ -1758,7 +2450,9 @@ public:
         if (audioCodec_ == nullptr) {
             return;
         }
-        checkAv(avcodec_send_frame(audioCodec_, frame), "send live audio frame");
+        FramePtr generatedFrame;
+        auto* safeFrame = fixedAudioFrame(frame, "live", generatedFrame);
+        checkAv(avcodec_send_frame(audioCodec_, safeFrame), "send live audio frame");
         drainAudioPackets();
     }
 
@@ -1793,7 +2487,8 @@ private:
         frame->pts = pts;
         checkAv(av_frame_get_buffer(frame.get(), 32), "allocate generated live frame buffer");
         checkAv(av_frame_make_writable(frame.get()), "make generated live frame writable");
-        fillBlack(*frame);
+        fillBlue(*frame);
+        normaliseVideoFrameProperties(*frame);
         return frame;
     }
 
@@ -1820,6 +2515,56 @@ private:
             return generatedFrame.get();
         }
         frame->pts = pts;
+        normaliseVideoFrameProperties(*frame);
+        return frame;
+    }
+
+    FramePtr generatedAudioFrame(std::int64_t pts, int samples)
+    {
+        FramePtr frame{av_frame_alloc()};
+        if (!frame) {
+            throw std::runtime_error{"allocate generated live audio frame failed"};
+        }
+        frame->format = audioCodec_->sample_fmt;
+        frame->sample_rate = audioCodec_->sample_rate;
+        frame->nb_samples = std::max(1, samples);
+        frame->pts = pts;
+        checkAv(av_channel_layout_copy(&frame->ch_layout, &audioCodec_->ch_layout), "copy generated live audio layout");
+        checkAv(av_frame_get_buffer(frame.get(), 0), "allocate generated live audio buffer");
+        checkAv(av_frame_make_writable(frame.get()), "make generated live audio writable");
+        for (int channel = 0; channel < frame->ch_layout.nb_channels; ++channel) {
+            if (frame->extended_data[channel] != nullptr) {
+                std::memset(frame->extended_data[channel], 0, static_cast<std::size_t>(frame->linesize[0]));
+            }
+        }
+        return frame;
+    }
+
+    AVFrame* fixedAudioFrame(AVFrame* frame, std::string_view source, FramePtr& generatedFrame)
+    {
+        const auto expectedSamples = audioCodec_->frame_size > 0 ? audioCodec_->frame_size : 1024;
+        auto pts = frame != nullptr ? frame->pts : AV_NOPTS_VALUE;
+        if (pts == AV_NOPTS_VALUE || (lastAudioPts_ != AV_NOPTS_VALUE && pts <= lastAudioPts_)) {
+            pts = lastAudioPts_ == AV_NOPTS_VALUE ? 0 : lastAudioPts_ + expectedSamples;
+            std::cerr << "wh-repeater: " << source << " audio timestamp repaired to " << pts << '\n';
+        }
+
+        const bool valid = frame != nullptr
+            && frame->format == audioCodec_->sample_fmt
+            && frame->sample_rate == audioCodec_->sample_rate
+            && frame->nb_samples == expectedSamples
+            && av_channel_layout_compare(&frame->ch_layout, &audioCodec_->ch_layout) == 0
+            && frame->extended_data != nullptr
+            && frame->extended_data[0] != nullptr;
+
+        lastAudioPts_ = pts;
+        if (!valid) {
+            std::cerr << "wh-repeater: " << source
+                      << " audio frame rejected before encoder; sending silence\n";
+            generatedFrame = generatedAudioFrame(pts, expectedSamples);
+            return generatedFrame.get();
+        }
+        frame->pts = pts;
         return frame;
     }
 
@@ -1843,10 +2588,11 @@ private:
         }
 
         const auto frameRate = std::clamp(frameRate_, 1, 50);
-        const auto videoBitrateKbps = std::max(250, static_cast<int>(config_.pluto.videoBitrateKbps));
-        auto encoder = softwareEncoderOnly_
-            ? openSoftwareH264Encoder(*format_, width_, height_, frameRate, videoBitrateKbps, "ultrafast")
-            : openH264Encoder(*format_, width_, height_, frameRate, videoBitrateKbps);
+        const auto videoBitrateKbps = fallbackVideoBitrateKbps(config_);
+        if (softwareEncoderOnly_) {
+            throw std::runtime_error{"software H.264 encode requested but hardware encode is mandatory"};
+        }
+        auto encoder = openH264Encoder(*format_, config_, width_, height_, frameRate, videoBitrateKbps);
         codec_ = encoder.context;
         identOverlay_ = std::make_unique<OverlayRenderer>(identFilter(identText(config_)),
                                                           codec_->width,
@@ -1995,14 +2741,14 @@ private:
     bool flushed_{false};
     int audioFrameSamples_{1024};
     std::int64_t lastVideoPts_{AV_NOPTS_VALUE};
+    std::int64_t lastAudioPts_{AV_NOPTS_VALUE};
 };
 
 class LiveTranscoder {
 public:
-    LiveTranscoder(RepeaterConfig config, PlutoSink& output, PersistentRtmpMuxer* rtmp, std::optional<ActiveInput> active)
+    LiveTranscoder(RepeaterConfig config, EncodedOutputSink& output, std::optional<ActiveInput> active)
         : config_{std::move(config)}
         , output_{output}
-        , rtmp_{rtmp}
         , active_{std::move(active)}
         , thread_{[this] {
             run();
@@ -2012,7 +2758,7 @@ public:
 
     ~LiveTranscoder()
     {
-        input_.stop();
+        stop();
         if (thread_.joinable()) {
             thread_.join();
         }
@@ -2026,14 +2772,59 @@ public:
         input_.append(data);
     }
 
+    void stop()
+    {
+        stopping_.store(true);
+        input_.stop();
+    }
+
+    [[nodiscard]] bool finished() const
+    {
+        return finished_.load();
+    }
+
+    [[nodiscard]] bool ready() const
+    {
+        return ready_.load();
+    }
+
+    [[nodiscard]] std::string error() const
+    {
+        return error_;
+    }
+
+    [[nodiscard]] std::chrono::steady_clock::time_point lastVideoFrameAt() const
+    {
+        const auto value = lastVideoFrameSteadyMs_.load();
+        if (value <= 0) {
+            return {};
+        }
+        return std::chrono::steady_clock::time_point{std::chrono::milliseconds{value}};
+    }
+
+    [[nodiscard]] std::optional<std::string> streamInfo() const
+    {
+        std::lock_guard lock{streamInfoMutex_};
+        return streamInfo_;
+    }
+
 private:
+    static std::int64_t steadyClockMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    }
+
     void run()
     {
         try {
             transcodeLoop();
         } catch (const std::exception& ex) {
+            error_ = ex.what();
             std::cerr << "wh-repeater: live transcode stopped: " << ex.what() << '\n';
         }
+        finished_.store(true);
     }
 
     void transcodeLoop()
@@ -2053,63 +2844,25 @@ private:
             av_free(avioBuffer);
             throw std::runtime_error{"allocate live input AVIO failed"};
         }
+        rawInput->interrupt_callback.callback = interruptLiveInput;
+        rawInput->interrupt_callback.opaque = this;
         rawInput->flags |= AVFMT_FLAG_CUSTOM_IO;
 
         const auto* demuxer = av_find_input_format("mpegts");
         AVFormatContext* openTarget = inputFormat.get();
-        checkAv(avformat_open_input(&openTarget, nullptr, demuxer, nullptr), "open received MPEG-TS");
+        AVDictionary* inputOptions = nullptr;
+        av_dict_set(&inputOptions, "probesize", "20000000", 0);
+        av_dict_set(&inputOptions, "analyzeduration", "5000000", 0);
+        const auto openStatus = avformat_open_input(&openTarget, nullptr, demuxer, &inputOptions);
+        av_dict_free(&inputOptions);
+        checkAv(openStatus, "open received MPEG-TS");
         inputFormat.release();
         inputFormat.reset(openTarget);
-        checkAv(avformat_find_stream_info(inputFormat.get(), nullptr), "probe received MPEG-TS streams");
 
-        const auto videoStreamIndex = av_find_best_stream(inputFormat.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-        checkAv(videoStreamIndex, "find received video stream");
-        auto* videoStream = inputFormat->streams[videoStreamIndex];
-        const auto codecId = videoStream->codecpar->codec_id;
-        const auto* decoder = findVideoDecoder(codecId);
-        if (decoder == nullptr) {
-            throw std::runtime_error{"no decoder available for received " + codecDescription(codecId)};
-        }
-
-        CodecContextPtr decoderContext{avcodec_alloc_context3(decoder)};
-        if (!decoderContext) {
-            throw std::runtime_error{"allocate live decoder failed"};
-        }
-        checkAv(avcodec_parameters_to_context(decoderContext.get(), videoStream->codecpar), "copy live decoder parameters");
-        checkAv(avcodec_open2(decoderContext.get(), decoder, nullptr), "open live video decoder");
-
-        auto audioStreamIndex = av_find_best_stream(inputFormat.get(), AVMEDIA_TYPE_AUDIO, -1, videoStreamIndex, nullptr, 0);
+        CodecContextPtr decoderContext;
         CodecContextPtr audioDecoderContext;
-        if (audioStreamIndex >= 0) {
-            auto* audioStream = inputFormat->streams[audioStreamIndex];
-            const auto* audioDecoder = avcodec_find_decoder(audioStream->codecpar->codec_id);
-            if (audioDecoder != nullptr) {
-                audioDecoderContext.reset(avcodec_alloc_context3(audioDecoder));
-                if (!audioDecoderContext) {
-                    throw std::runtime_error{"allocate live audio decoder failed"};
-                }
-                checkAv(avcodec_parameters_to_context(audioDecoderContext.get(), audioStream->codecpar), "copy live audio parameters");
-                checkAv(avcodec_open2(audioDecoderContext.get(), audioDecoder, nullptr), "open live audio decoder");
-                std::cout << "media pipeline detected received "
-                          << (avcodec_get_name(audioStream->codecpar->codec_id) == nullptr ? "audio" : avcodec_get_name(audioStream->codecpar->codec_id))
-                          << " audio at " << audioDecoderContext->sample_rate << " Hz\n";
-            } else {
-                std::cerr << "wh-repeater: no decoder available for received audio stream\n";
-                audioStreamIndex = AVERROR_STREAM_NOT_FOUND;
-            }
-        }
-
-        const auto decodedWidth = evenDimension(decoderContext->width > 0 ? decoderContext->width : videoStream->codecpar->width);
-        const auto decodedHeight = evenDimension(decoderContext->height > 0 ? decoderContext->height : videoStream->codecpar->height);
-        const auto frameRate = streamFrameRate(*videoStream);
-        std::cout << "media pipeline detected received " << codecDescription(codecId)
-                  << " video, decoding with " << (decoder->name == nullptr ? "default" : decoder->name)
-                  << " at " << decodedWidth << "x" << decodedHeight << " " << frameRate << " fps\n";
-
-        auto streamInfo = active_.has_value()
-            ? std::optional<std::string>{streamInfoText(*active_, codecDescription(codecId), decodedWidth, decodedHeight, frameRate)}
-            : std::nullopt;
-        H264OutputMuxer outputMuxer{config_, output_, rtmp_, outputWidth(config_), outputHeight(config_), outputFrameRate(config_), std::move(streamInfo)};
+        int videoStreamIndex = AVERROR_STREAM_NOT_FOUND;
+        int audioStreamIndex = AVERROR_STREAM_NOT_FOUND;
         auto frame = FramePtr{av_frame_alloc()};
         auto convertedFrame = FramePtr{av_frame_alloc()};
         auto packet = PacketPtr{av_packet_alloc()};
@@ -2117,26 +2870,50 @@ private:
             throw std::runtime_error{"allocate live transcode buffers failed"};
         }
 
-        convertedFrame->format = outputMuxer.pixelFormat();
-        convertedFrame->width = outputMuxer.width();
-        convertedFrame->height = outputMuxer.height();
-        checkAv(av_frame_get_buffer(convertedFrame.get(), 32), "allocate live converted frame buffer");
-
         SwsContextPtr scaler;
         SwrContextPtr audioResampler;
         AudioFifoPtr audioFifo;
         auto audioFrame = FramePtr{av_frame_alloc()};
         auto convertedAudioFrame = FramePtr{av_frame_alloc()};
-        std::int64_t audioPts = 0;
+        std::int64_t audioPts = AV_NOPTS_VALUE;
         std::int64_t frameIndex = 0;
+        auto videoDecodeStartedAt = std::chrono::steady_clock::time_point{};
+        auto lastDecodedFrameAt = std::chrono::steady_clock::time_point{};
         while (true) {
             const auto readStatus = av_read_frame(inputFormat.get(), packet.get());
             if (readStatus == AVERROR_EOF) {
                 break;
             }
+            if (readStatus == AVERROR(EAGAIN) || readStatus == AVERROR_INVALIDDATA) {
+                continue;
+            }
             checkAv(readStatus, "read received MPEG-TS packet");
-            if (packet->stream_index == videoStreamIndex) {
-                decodePacket(decoderContext.get(), packet.get(), frame.get(), convertedFrame.get(), scaler, outputMuxer, frameIndex);
+
+            if (!decoderContext && packet->stream_index >= 0) {
+                maybeInitialiseVideoDecoder(inputFormat.get(),
+                                            packet->stream_index,
+                                            decoderContext,
+                                            convertedFrame.get(),
+                                            videoStreamIndex);
+            }
+            if (decoderContext && !audioDecoderContext && packet->stream_index >= 0) {
+                maybeInitialiseAudioDecoder(inputFormat.get(), packet->stream_index, audioDecoderContext, audioStreamIndex);
+            }
+
+            if (decoderContext && packet->stream_index == videoStreamIndex) {
+                if (videoDecodeStartedAt == std::chrono::steady_clock::time_point{}) {
+                    videoDecodeStartedAt = std::chrono::steady_clock::now();
+                }
+                const auto decodedFrames = decodePacket(decoderContext.get(),
+                                                        packet.get(),
+                                                        frame.get(),
+                                                        convertedFrame.get(),
+                                                        scaler,
+                                                        frameIndex);
+                if (decodedFrames > 0) {
+                    lastDecodedFrameAt = std::chrono::steady_clock::now();
+                }
+                enforceLiveVideoProgress(videoDecodeStartedAt, lastDecodedFrameAt);
             } else if (audioDecoderContext && packet->stream_index == audioStreamIndex) {
                 decodeAudioPacket(audioDecoderContext.get(),
                                   packet.get(),
@@ -2144,20 +2921,164 @@ private:
                                   convertedAudioFrame.get(),
                                   audioResampler,
                                   audioFifo,
-                                  outputMuxer,
                                   audioPts);
             }
             av_packet_unref(packet.get());
         }
 
-        checkAv(avcodec_send_packet(decoderContext.get(), nullptr), "flush live decoder");
-        drainDecoder(decoderContext.get(), frame.get(), convertedFrame.get(), scaler, outputMuxer, frameIndex);
+        if (decoderContext) {
+            checkAv(avcodec_send_packet(decoderContext.get(), nullptr), "flush live decoder");
+            const auto decodedFrames = drainDecoder(decoderContext.get(),
+                                                    frame.get(),
+                                                    convertedFrame.get(),
+                                                    scaler,
+                                                    frameIndex);
+            if (decodedFrames > 0) {
+                lastDecodedFrameAt = std::chrono::steady_clock::now();
+            }
+        }
         if (audioDecoderContext) {
             checkAv(avcodec_send_packet(audioDecoderContext.get(), nullptr), "flush live audio decoder");
-            drainAudioDecoder(audioDecoderContext.get(), audioFrame.get(), convertedAudioFrame.get(), audioResampler, audioFifo, outputMuxer, audioPts);
-            flushAudioFifo(audioFifo, outputMuxer, audioPts);
+            drainAudioDecoder(audioDecoderContext.get(),
+                              audioFrame.get(),
+                              convertedAudioFrame.get(),
+                              audioResampler,
+                              audioFifo,
+                              audioPts);
+            discardPartialAudioFifo(audioFifo);
         }
-        outputMuxer.flush();
+    }
+
+    static int interruptLiveInput(void* opaque)
+    {
+        auto* self = static_cast<LiveTranscoder*>(opaque);
+        return self != nullptr && self->stopping_.load() ? 1 : 0;
+    }
+
+    bool maybeInitialiseVideoDecoder(AVFormatContext* inputFormat,
+                                     int streamIndex,
+                                     CodecContextPtr& decoderContext,
+                                     AVFrame* convertedFrame,
+                                     int& videoStreamIndex)
+    {
+        if (streamIndex < 0 || streamIndex >= static_cast<int>(inputFormat->nb_streams)) {
+            return false;
+        }
+        auto* stream = inputFormat->streams[streamIndex];
+        if (stream == nullptr || stream->codecpar == nullptr) {
+            return false;
+        }
+        const auto codecId = stream->codecpar->codec_id;
+        logLiveStreamOnce(*stream);
+        const auto knownVideo = codecId == AV_CODEC_ID_H264
+            || codecId == AV_CODEC_ID_HEVC
+            || codecId == AV_CODEC_ID_MPEG2VIDEO;
+        if (stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO && !knownVideo) {
+            return false;
+        }
+
+        const auto* decoder = avcodec_find_decoder(codecId);
+        if (decoder == nullptr) {
+            std::cerr << "wh-repeater: no decoder available for received " << codecDescription(codecId) << '\n';
+            return false;
+        }
+
+        CodecContextPtr context{avcodec_alloc_context3(decoder)};
+        if (!context) {
+            throw std::runtime_error{"allocate live decoder failed"};
+        }
+        checkAv(avcodec_parameters_to_context(context.get(), stream->codecpar), "copy live decoder parameters");
+        checkAv(avcodec_open2(context.get(), decoder, nullptr), "open live video decoder");
+
+        const auto decodedWidth = evenDimension(stream->codecpar->width > 0 ? stream->codecpar->width : outputWidth(config_));
+        const auto decodedHeight = evenDimension(stream->codecpar->height > 0 ? stream->codecpar->height : outputHeight(config_));
+        const auto frameRate = streamFrameRate(*stream);
+        std::cout << "media pipeline detected received " << codecDescription(codecId)
+                  << " video, decoding with " << (decoder->name == nullptr ? "default" : decoder->name)
+                  << " at " << decodedWidth << "x" << decodedHeight << " " << frameRate << " fps\n";
+
+        auto streamInfo = active_.has_value()
+            ? std::optional<std::string>{streamInfoText(*active_,
+                                                        codecDescription(codecId),
+                                                        decodedWidth,
+                                                        decodedHeight,
+                                                        frameRate,
+                                                        *inputFormat,
+                                                        *stream)}
+            : std::nullopt;
+        {
+            std::lock_guard lock{streamInfoMutex_};
+            streamInfo_ = streamInfo;
+        }
+        output_.setStreamInfo(streamInfo);
+        convertedFrame->format = output_.pixelFormat();
+        convertedFrame->width = output_.width();
+        convertedFrame->height = output_.height();
+        checkAv(av_frame_get_buffer(convertedFrame, 32), "allocate live converted frame buffer");
+
+        videoStreamIndex = streamIndex;
+        decoderContext = std::move(context);
+        return true;
+    }
+
+    bool maybeInitialiseAudioDecoder(AVFormatContext* inputFormat,
+                                     int streamIndex,
+                                     CodecContextPtr& audioDecoderContext,
+                                     int& audioStreamIndex)
+    {
+        if (streamIndex < 0 || streamIndex >= static_cast<int>(inputFormat->nb_streams)) {
+            return false;
+        }
+        auto* stream = inputFormat->streams[streamIndex];
+        if (stream == nullptr || stream->codecpar == nullptr) {
+            return false;
+        }
+        const auto codecId = stream->codecpar->codec_id;
+        logLiveStreamOnce(*stream);
+        const auto knownAudio = codecId == AV_CODEC_ID_MP2
+            || codecId == AV_CODEC_ID_MP3
+            || codecId == AV_CODEC_ID_AAC;
+        if (stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO && !knownAudio) {
+            return false;
+        }
+        if (stream->codecpar->sample_rate <= 0 || stream->codecpar->ch_layout.nb_channels <= 0) {
+            return false;
+        }
+
+        const auto* audioDecoder = avcodec_find_decoder(codecId);
+        if (audioDecoder == nullptr) {
+            std::cerr << "wh-repeater: no decoder available for received audio stream\n";
+            return false;
+        }
+
+        CodecContextPtr context{avcodec_alloc_context3(audioDecoder)};
+        if (!context) {
+            throw std::runtime_error{"allocate live audio decoder failed"};
+        }
+        checkAv(avcodec_parameters_to_context(context.get(), stream->codecpar), "copy live audio parameters");
+        checkAv(avcodec_open2(context.get(), audioDecoder, nullptr), "open live audio decoder");
+        std::cout << "media pipeline detected received "
+                  << (avcodec_get_name(stream->codecpar->codec_id) == nullptr ? "audio" : avcodec_get_name(stream->codecpar->codec_id))
+                  << " audio at " << context->sample_rate << " Hz\n";
+
+        audioStreamIndex = streamIndex;
+        audioDecoderContext = std::move(context);
+        return true;
+    }
+
+    void logLiveStreamOnce(const AVStream& stream)
+    {
+        const auto index = static_cast<int>(stream.index);
+        if (std::ranges::find(loggedLiveStreams_, index) != loggedLiveStreams_.end()) {
+            return;
+        }
+        loggedLiveStreams_.push_back(index);
+        const auto* type = av_get_media_type_string(stream.codecpar->codec_type);
+        std::cout << "media pipeline live stream index=" << index
+                  << " pid=0x" << std::hex << stream.id << std::dec
+                  << " type=" << (type == nullptr ? "unknown" : type)
+                  << " codec=" << avcodec_get_name(stream.codecpar->codec_id)
+                  << '\n';
     }
 
     void decodeAudioPacket(AVCodecContext* decoder,
@@ -2166,17 +3087,22 @@ private:
                            AVFrame* convertedFrame,
                            SwrContextPtr& resampler,
                            AudioFifoPtr& fifo,
-                           H264OutputMuxer& outputMuxer,
                            std::int64_t& audioPts)
     {
         const auto sendStatus = avcodec_send_packet(decoder, packet);
         if (sendStatus == AVERROR(EAGAIN)) {
-            drainAudioDecoder(decoder, frame, convertedFrame, resampler, fifo, outputMuxer, audioPts);
-            checkAv(avcodec_send_packet(decoder, packet), "send received audio packet after drain");
+            drainAudioDecoder(decoder, frame, convertedFrame, resampler, fifo, audioPts);
+            const auto retryStatus = avcodec_send_packet(decoder, packet);
+            if (retryStatus == AVERROR_INVALIDDATA) {
+                return;
+            }
+            checkAv(retryStatus, "send received audio packet after drain");
+        } else if (sendStatus == AVERROR_INVALIDDATA) {
+            return;
         } else {
             checkAv(sendStatus, "send received audio packet");
         }
-        drainAudioDecoder(decoder, frame, convertedFrame, resampler, fifo, outputMuxer, audioPts);
+        drainAudioDecoder(decoder, frame, convertedFrame, resampler, fifo, audioPts);
     }
 
     void drainAudioDecoder(AVCodecContext* decoder,
@@ -2184,16 +3110,25 @@ private:
                            AVFrame* convertedFrame,
                            SwrContextPtr& resampler,
                            AudioFifoPtr& fifo,
-                           H264OutputMuxer& outputMuxer,
                            std::int64_t& audioPts)
     {
         for (;;) {
+            if (stopping_.load()) {
+                break;
+            }
             const auto receiveStatus = avcodec_receive_frame(decoder, frame);
             if (receiveStatus == AVERROR(EAGAIN) || receiveStatus == AVERROR_EOF) {
                 break;
             }
+            if (receiveStatus == AVERROR_INVALIDDATA) {
+                continue;
+            }
             checkAv(receiveStatus, "receive decoded live audio frame");
-            queueAudioFrame(frame, convertedFrame, resampler, fifo, outputMuxer, audioPts);
+            if (!ready_.load()) {
+                av_frame_unref(frame);
+                continue;
+            }
+            queueAudioFrame(frame, convertedFrame, resampler, fifo, audioPts);
             av_frame_unref(frame);
         }
     }
@@ -2202,12 +3137,14 @@ private:
                          AVFrame* convertedFrame,
                          SwrContextPtr& resampler,
                          AudioFifoPtr& fifo,
-                         H264OutputMuxer& outputMuxer,
                          std::int64_t& audioPts)
     {
-        auto* audioCodec = outputMuxer.audioCodec();
+        auto* audioCodec = output_.audioCodec();
         if (audioCodec == nullptr) {
             return;
+        }
+        if (audioPts == AV_NOPTS_VALUE) {
+            audioPts = output_.nextAudioPts();
         }
         if (!resampler) {
             AVChannelLayout inputLayout{};
@@ -2236,6 +3173,7 @@ private:
             if (!fifo) {
                 throw std::runtime_error{"allocate live audio FIFO failed"};
             }
+            audioPts = output_.nextAudioPts();
         }
 
         const auto delay = swr_get_delay(resampler.get(), frame->sample_rate);
@@ -2262,12 +3200,14 @@ private:
         if (av_audio_fifo_write(fifo.get(), reinterpret_cast<void**>(convertedFrame->extended_data), convertedSamples) < convertedSamples) {
             throw std::runtime_error{"write live audio FIFO failed"};
         }
-        drainAudioFifo(fifo, outputMuxer, audioPts, false);
+        drainAudioFifo(fifo, audioPts, false);
     }
 
-    void drainAudioFifo(AudioFifoPtr& fifo, H264OutputMuxer& outputMuxer, std::int64_t& audioPts, bool flush)
+    void drainAudioFifo(AudioFifoPtr& fifo,
+                        std::int64_t& audioPts,
+                        bool flush)
     {
-        auto* audioCodec = outputMuxer.audioCodec();
+        auto* audioCodec = output_.audioCodec();
         if (audioCodec == nullptr || !fifo) {
             return;
         }
@@ -2288,61 +3228,108 @@ private:
                 throw std::runtime_error{"read live audio FIFO failed"};
             }
             audioPts += samples;
-            outputMuxer.encodeAudio(frame.get());
+            if (stopping_.load()) {
+                return;
+            }
+            output_.submitAudioFrame(frame.get(), "live");
         }
     }
 
-    void flushAudioFifo(AudioFifoPtr& fifo, H264OutputMuxer& outputMuxer, std::int64_t& audioPts)
+    void discardPartialAudioFifo(AudioFifoPtr& fifo)
     {
-        drainAudioFifo(fifo, outputMuxer, audioPts, true);
+        if (fifo && av_audio_fifo_size(fifo.get()) > 0) {
+            std::cerr << "wh-repeater: dropping partial live audio frame at source boundary\n";
+        }
     }
 
-    void decodePacket(AVCodecContext* decoder,
-                      AVPacket* packet,
-                      AVFrame* frame,
-                      AVFrame* convertedFrame,
-                      SwsContextPtr& scaler,
-                      H264OutputMuxer& outputMuxer,
-                      std::int64_t& frameIndex)
+    int decodePacket(AVCodecContext* decoder,
+                     AVPacket* packet,
+                     AVFrame* frame,
+                     AVFrame* convertedFrame,
+                     SwsContextPtr& scaler,
+                     std::int64_t& frameIndex)
     {
+        int decodedFrames = 0;
         const auto sendStatus = avcodec_send_packet(decoder, packet);
         if (sendStatus == AVERROR(EAGAIN)) {
-            drainDecoder(decoder, frame, convertedFrame, scaler, outputMuxer, frameIndex);
-            checkAv(avcodec_send_packet(decoder, packet), "send received packet after drain");
+            decodedFrames += drainDecoder(decoder, frame, convertedFrame, scaler, frameIndex);
+            const auto retryStatus = avcodec_send_packet(decoder, packet);
+            if (retryStatus == AVERROR_INVALIDDATA) {
+                return decodedFrames;
+            }
+            checkAv(retryStatus, "send received packet after drain");
+        } else if (sendStatus == AVERROR_INVALIDDATA) {
+            return decodedFrames;
         } else {
             checkAv(sendStatus, "send received packet");
         }
-        drainDecoder(decoder, frame, convertedFrame, scaler, outputMuxer, frameIndex);
+        decodedFrames += drainDecoder(decoder, frame, convertedFrame, scaler, frameIndex);
+        return decodedFrames;
     }
 
-    void drainDecoder(AVCodecContext* decoder,
-                      AVFrame* frame,
-                      AVFrame* convertedFrame,
-                      SwsContextPtr& scaler,
-                      H264OutputMuxer& outputMuxer,
-                      std::int64_t& frameIndex)
+    int drainDecoder(AVCodecContext* decoder,
+                     AVFrame* frame,
+                     AVFrame* convertedFrame,
+                     SwsContextPtr& scaler,
+                     std::int64_t& frameIndex)
     {
+        int decodedFrames = 0;
         for (;;) {
+            if (stopping_.load()) {
+                break;
+            }
             const auto receiveStatus = avcodec_receive_frame(decoder, frame);
             if (receiveStatus == AVERROR(EAGAIN) || receiveStatus == AVERROR_EOF) {
                 break;
             }
+            if (receiveStatus == AVERROR_INVALIDDATA) {
+                continue;
+            }
             checkAv(receiveStatus, "receive decoded live frame");
-            outputMuxer.encode(convertFrame(frame, convertedFrame, scaler, outputMuxer, frameIndex++));
+            lastVideoFrameSteadyMs_.store(steadyClockMs());
+            ready_.store(true);
+            if (stopping_.load()) {
+                av_frame_unref(frame);
+                break;
+            }
+            output_.submitVideoFrame(convertFrame(frame, convertedFrame, scaler, frameIndex++), "live");
+            lastVideoFrameSteadyMs_.store(steadyClockMs());
+            ++decodedFrames;
             av_frame_unref(frame);
+        }
+        return decodedFrames;
+    }
+
+    void enforceLiveVideoProgress(std::chrono::steady_clock::time_point videoDecodeStartedAt,
+                                  std::chrono::steady_clock::time_point lastDecodedFrameAt) const
+    {
+        if (videoDecodeStartedAt == std::chrono::steady_clock::time_point{}) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (lastDecodedFrameAt == std::chrono::steady_clock::time_point{}) {
+            if (now - videoDecodeStartedAt > liveVideoAcquisitionTimeout) {
+                throw std::runtime_error{"no valid decoded video frames in received stream"};
+            }
+            return;
+        }
+        constexpr auto liveVideoStallTimeout = std::chrono::seconds{3};
+        if (ready_.load() && now - lastDecodedFrameAt > liveVideoStallTimeout) {
+            return;
         }
     }
 
     AVFrame* convertFrame(AVFrame* frame,
                           AVFrame* convertedFrame,
                           SwsContextPtr& scaler,
-                          const H264OutputMuxer& outputMuxer,
                           std::int64_t pts)
     {
-        if (frame->format == outputMuxer.pixelFormat()
-            && frame->width == outputMuxer.width()
-            && frame->height == outputMuxer.height()) {
+        pts = output_.nextVideoPts();
+        if (frame->format == output_.pixelFormat()
+            && frame->width == output_.width()
+            && frame->height == output_.height()) {
             frame->pts = pts;
+            normaliseVideoFrameProperties(*frame);
             return frame;
         }
 
@@ -2351,9 +3338,9 @@ private:
             scaler.reset(sws_getContext(frame->width,
                                         frame->height,
                                         static_cast<AVPixelFormat>(frame->format),
-                                        outputMuxer.width(),
-                                        outputMuxer.height(),
-                                        outputMuxer.pixelFormat(),
+                                        output_.width(),
+                                        output_.height(),
+                                        output_.pixelFormat(),
                                         SWS_FAST_BILINEAR,
                                         nullptr,
                                         nullptr,
@@ -2370,23 +3357,30 @@ private:
                   convertedFrame->data,
                   convertedFrame->linesize);
         convertedFrame->pts = pts;
+        normaliseVideoFrameProperties(*convertedFrame);
         return convertedFrame;
     }
 
     RepeaterConfig config_;
-    PlutoSink& output_;
-    PersistentRtmpMuxer* rtmp_{};
+    EncodedOutputSink& output_;
     std::optional<ActiveInput> active_;
     BlockingTsInput input_;
+    std::atomic_bool stopping_{false};
+    std::atomic_bool ready_{false};
+    std::atomic_bool finished_{false};
+    std::atomic<std::int64_t> lastVideoFrameSteadyMs_{0};
+    std::string error_;
+    mutable std::mutex streamInfoMutex_;
+    std::optional<std::string> streamInfo_;
+    std::vector<int> loggedLiveStreams_;
     std::thread thread_;
 };
 
 class FallbackVideoTranscoder {
 public:
-    FallbackVideoTranscoder(RepeaterConfig config, PlutoSink& output, PersistentRtmpMuxer* rtmp, std::filesystem::path path)
+    FallbackVideoTranscoder(RepeaterConfig config, EncodedOutputSink& output, std::filesystem::path path)
         : config_{std::move(config)}
         , output_{output}
-        , rtmp_{rtmp}
         , path_{std::move(path)}
         , thread_{[this] {
             run();
@@ -2525,7 +3519,7 @@ private:
         const auto streamInfo = std::string{"Fallback video\n"} + path_.filename().string() + "\n"
             + codecDescription(codecId) + " " + std::to_string(decodedWidth) + "x" + std::to_string(decodedHeight)
             + (usingHardwareDecoder ? "\nhardware decode" : "\nsoftware decode");
-        H264OutputMuxer outputMuxer{config_, output_, rtmp_, outputWidth(config_), outputHeight(config_), outputFrameRate(config_), streamInfo};
+        output_.setStreamInfo(streamInfo);
 
         std::cout << "media pipeline playing fallback video " << path_
                   << " as " << outputWidth(config_) << "x" << outputHeight(config_)
@@ -2540,9 +3534,9 @@ private:
             throw std::runtime_error{"allocate fallback video buffers failed"};
         }
 
-        convertedFrame->format = outputMuxer.pixelFormat();
-        convertedFrame->width = outputMuxer.width();
-        convertedFrame->height = outputMuxer.height();
+        convertedFrame->format = output_.pixelFormat();
+        convertedFrame->width = output_.width();
+        convertedFrame->height = output_.height();
         checkAv(av_frame_get_buffer(convertedFrame.get(), 32), "allocate fallback video converted frame");
 
         SwsContextPtr scaler;
@@ -2578,8 +3572,7 @@ private:
                              frame.get(),
                              convertedFrame.get(),
                              scaler,
-                             outputMuxer,
-                             startedAt,
+                             output_,
                              *videoStream,
                              streamSampleAspect,
                              firstVideoSeconds,
@@ -2592,9 +3585,8 @@ private:
                                   convertedAudioFrame.get(),
                                   audioResampler,
                                   audioFifo,
-                                  outputMuxer,
-                                  audioPts,
-                                  startedAt);
+                                  output_,
+                                  audioPts);
             }
             av_packet_unref(packet.get());
         }
@@ -2604,8 +3596,7 @@ private:
                      frame.get(),
                      convertedFrame.get(),
                      scaler,
-                     outputMuxer,
-                     startedAt,
+                     output_,
                      *videoStream,
                      streamSampleAspect,
                      firstVideoSeconds,
@@ -2618,12 +3609,10 @@ private:
                               convertedAudioFrame.get(),
                               audioResampler,
                               audioFifo,
-                              outputMuxer,
-                              audioPts,
-                              startedAt);
-            flushAudioFifo(audioFifo, outputMuxer, audioPts, startedAt);
+                              output_,
+                              audioPts);
+            flushAudioFifo(audioFifo, output_, audioPts);
         }
-        outputMuxer.flush();
     }
 
     void decodePacket(AVCodecContext* decoder,
@@ -2631,8 +3620,7 @@ private:
                       AVFrame* frame,
                       AVFrame* convertedFrame,
                       SwsContextPtr& scaler,
-                      H264OutputMuxer& outputMuxer,
-                      std::chrono::steady_clock::time_point startedAt,
+                      EncodedOutputSink& outputMuxer,
                       const AVStream& videoStream,
                       AVRational streamSampleAspect,
                       std::optional<double>& firstVideoSeconds,
@@ -2646,7 +3634,6 @@ private:
                          convertedFrame,
                          scaler,
                          outputMuxer,
-                         startedAt,
                          videoStream,
                          streamSampleAspect,
                          firstVideoSeconds,
@@ -2661,7 +3648,6 @@ private:
                      convertedFrame,
                      scaler,
                      outputMuxer,
-                     startedAt,
                      videoStream,
                      streamSampleAspect,
                      firstVideoSeconds,
@@ -2673,8 +3659,7 @@ private:
                       AVFrame* frame,
                       AVFrame* convertedFrame,
                       SwsContextPtr& scaler,
-                      H264OutputMuxer& outputMuxer,
-                      std::chrono::steady_clock::time_point startedAt,
+                      EncodedOutputSink& outputMuxer,
                       const AVStream& videoStream,
                       AVRational streamSampleAspect,
                       std::optional<double>& firstVideoSeconds,
@@ -2688,10 +3673,7 @@ private:
             }
             checkAv(receiveStatus, "receive fallback video frame");
             auto pts = sourceVideoPts(*frame, videoStream, outputMuxer, firstVideoSeconds, lastVideoPts, frameIndex);
-            const auto target = startedAt + std::chrono::microseconds{
-                static_cast<std::int64_t>(pts * 1'000'000 / outputMuxer.frameRate())};
-            std::this_thread::sleep_until(target);
-            outputMuxer.encode(convertFrame(frame, convertedFrame, scaler, outputMuxer, streamSampleAspect, pts));
+            outputMuxer.submitVideoFrame(convertFrame(frame, convertedFrame, scaler, outputMuxer, streamSampleAspect, pts), "fallback-video");
             frameIndex = std::max(frameIndex + 1, pts + 1);
             av_frame_unref(frame);
             if (stopping_.load()) {
@@ -2702,7 +3684,7 @@ private:
 
     std::int64_t sourceVideoPts(AVFrame& frame,
                                 const AVStream& videoStream,
-                                const H264OutputMuxer& outputMuxer,
+                                const EncodedOutputSink& outputMuxer,
                                 std::optional<double>& firstVideoSeconds,
                                 std::int64_t& lastVideoPts,
                                 std::int64_t fallbackFrameIndex)
@@ -2729,7 +3711,7 @@ private:
     AVFrame* convertFrame(AVFrame* frame,
                           AVFrame* convertedFrame,
                           SwsContextPtr& scaler,
-                          const H264OutputMuxer& outputMuxer,
+                          const EncodedOutputSink& outputMuxer,
                           AVRational streamSampleAspect,
                           std::int64_t pts)
     {
@@ -2792,18 +3774,17 @@ private:
                            AVFrame* convertedFrame,
                            SwrContextPtr& resampler,
                            AudioFifoPtr& fifo,
-                           H264OutputMuxer& outputMuxer,
-                           std::int64_t& audioPts,
-                           std::chrono::steady_clock::time_point startedAt)
+                           EncodedOutputSink& outputMuxer,
+                           std::int64_t& audioPts)
     {
         const auto sendStatus = avcodec_send_packet(decoder, packet);
         if (sendStatus == AVERROR(EAGAIN)) {
-            drainAudioDecoder(decoder, frame, convertedFrame, resampler, fifo, outputMuxer, audioPts, startedAt);
+            drainAudioDecoder(decoder, frame, convertedFrame, resampler, fifo, outputMuxer, audioPts);
             checkAv(avcodec_send_packet(decoder, packet), "send fallback audio packet after drain");
         } else {
             checkAv(sendStatus, "send fallback audio packet");
         }
-        drainAudioDecoder(decoder, frame, convertedFrame, resampler, fifo, outputMuxer, audioPts, startedAt);
+        drainAudioDecoder(decoder, frame, convertedFrame, resampler, fifo, outputMuxer, audioPts);
     }
 
     void drainAudioDecoder(AVCodecContext* decoder,
@@ -2811,9 +3792,8 @@ private:
                            AVFrame* convertedFrame,
                            SwrContextPtr& resampler,
                            AudioFifoPtr& fifo,
-                           H264OutputMuxer& outputMuxer,
-                           std::int64_t& audioPts,
-                           std::chrono::steady_clock::time_point startedAt)
+                           EncodedOutputSink& outputMuxer,
+                           std::int64_t& audioPts)
     {
         for (;;) {
             const auto receiveStatus = avcodec_receive_frame(decoder, frame);
@@ -2821,7 +3801,7 @@ private:
                 break;
             }
             checkAv(receiveStatus, "receive fallback audio frame");
-            queueAudioFrame(frame, convertedFrame, resampler, fifo, outputMuxer, audioPts, startedAt);
+            queueAudioFrame(frame, convertedFrame, resampler, fifo, outputMuxer, audioPts);
             av_frame_unref(frame);
         }
     }
@@ -2830,9 +3810,8 @@ private:
                          AVFrame* convertedFrame,
                          SwrContextPtr& resampler,
                          AudioFifoPtr& fifo,
-                         H264OutputMuxer& outputMuxer,
-                         std::int64_t& audioPts,
-                         std::chrono::steady_clock::time_point startedAt)
+                         EncodedOutputSink& outputMuxer,
+                         std::int64_t& audioPts)
     {
         auto* audioCodec = outputMuxer.audioCodec();
         if (audioCodec == nullptr) {
@@ -2891,14 +3870,13 @@ private:
         if (av_audio_fifo_write(fifo.get(), reinterpret_cast<void**>(convertedFrame->extended_data), convertedSamples) < convertedSamples) {
             throw std::runtime_error{"write fallback audio FIFO failed"};
         }
-        drainAudioFifo(fifo, outputMuxer, audioPts, false, startedAt);
+        drainAudioFifo(fifo, outputMuxer, audioPts, false);
     }
 
     void drainAudioFifo(AudioFifoPtr& fifo,
-                        H264OutputMuxer& outputMuxer,
+                        EncodedOutputSink& outputMuxer,
                         std::int64_t& audioPts,
-                        bool flush,
-                        std::chrono::steady_clock::time_point startedAt)
+                        bool flush)
     {
         auto* audioCodec = outputMuxer.audioCodec();
         if (audioCodec == nullptr || !fifo) {
@@ -2915,30 +3893,25 @@ private:
             frame->sample_rate = audioCodec->sample_rate;
             frame->nb_samples = samples;
             frame->pts = audioPts;
-            const auto target = startedAt + std::chrono::microseconds{
-                static_cast<std::int64_t>(audioPts * 1'000'000 / audioCodec->sample_rate)};
-            std::this_thread::sleep_until(target);
             checkAv(av_channel_layout_copy(&frame->ch_layout, &audioCodec->ch_layout), "copy fallback encoded audio layout");
             checkAv(av_frame_get_buffer(frame.get(), 0), "allocate fallback encoded audio frame buffer");
             if (av_audio_fifo_read(fifo.get(), reinterpret_cast<void**>(frame->extended_data), samples) < samples) {
                 throw std::runtime_error{"read fallback audio FIFO failed"};
             }
             audioPts += samples;
-            outputMuxer.encodeAudio(frame.get());
+            outputMuxer.submitAudioFrame(frame.get(), "fallback-video");
         }
     }
 
     void flushAudioFifo(AudioFifoPtr& fifo,
-                        H264OutputMuxer& outputMuxer,
-                        std::int64_t& audioPts,
-                        std::chrono::steady_clock::time_point startedAt)
+                        EncodedOutputSink& outputMuxer,
+                        std::int64_t& audioPts)
     {
-        drainAudioFifo(fifo, outputMuxer, audioPts, true, startedAt);
+        drainAudioFifo(fifo, outputMuxer, audioPts, true);
     }
 
     RepeaterConfig config_;
-    PlutoSink& output_;
-    PersistentRtmpMuxer* rtmp_{};
+    EncodedOutputSink& output_;
     std::filesystem::path path_;
     std::atomic_bool stopping_{false};
     std::atomic_bool finished_{false};
@@ -2947,10 +3920,9 @@ private:
 
 class AnalogueCaptureTranscoder {
 public:
-    AnalogueCaptureTranscoder(RepeaterConfig config, PlutoSink& output, PersistentRtmpMuxer* rtmp, std::optional<ActiveInput> active)
+    AnalogueCaptureTranscoder(RepeaterConfig config, EncodedOutputSink& output, std::optional<ActiveInput> active)
         : config_{std::move(config)}
         , output_{output}
-        , rtmp_{rtmp}
         , active_{std::move(active)}
         , thread_{[this] {
             run();
@@ -3049,7 +4021,7 @@ private:
         auto streamInfo = active_.has_value()
             ? std::optional<std::string>{streamInfoText(*active_, "SD analogue", width, height, frameRate)}
             : std::optional<std::string>{std::string{"SD analogue\n"} + videoSize + " " + captureFrameRate + " fps"};
-        H264OutputMuxer outputMuxer{config_, output_, rtmp_, outputWidth(config_), outputHeight(config_), outputFrameRate(config_), std::move(streamInfo)};
+        output_.setStreamInfo(std::move(streamInfo));
 
         std::cout << "media pipeline capturing analogue from " << capture.captureDevice
                   << " as " << capture.captureStandard << " " << videoSize << " " << captureFrameRate << " fps\n";
@@ -3063,9 +4035,9 @@ private:
             throw std::runtime_error{"allocate analogue capture buffers failed"};
         }
 
-        convertedFrame->format = outputMuxer.pixelFormat();
-        convertedFrame->width = outputMuxer.width();
-        convertedFrame->height = outputMuxer.height();
+        convertedFrame->format = output_.pixelFormat();
+        convertedFrame->width = output_.width();
+        convertedFrame->height = output_.height();
         checkAv(av_frame_get_buffer(convertedFrame.get(), 32), "allocate analogue converted frame");
 
         SwsContextPtr scaler;
@@ -3078,14 +4050,13 @@ private:
             }
             checkAv(readStatus, "read analogue frame");
             if (packet->stream_index == videoStreamIndex) {
-                decodePacket(decoderContext.get(), packet.get(), frame.get(), convertedFrame.get(), scaler, outputMuxer, captureStartedAt, lastFramePts);
+                decodePacket(decoderContext.get(), packet.get(), frame.get(), convertedFrame.get(), scaler, output_, captureStartedAt, lastFramePts);
             }
             av_packet_unref(packet.get());
         }
 
         checkAv(avcodec_send_packet(decoderContext.get(), nullptr), "flush SD1 analogue decoder");
-        drainDecoder(decoderContext.get(), frame.get(), convertedFrame.get(), scaler, outputMuxer, captureStartedAt, lastFramePts);
-        outputMuxer.flush();
+        drainDecoder(decoderContext.get(), frame.get(), convertedFrame.get(), scaler, output_, captureStartedAt, lastFramePts);
     }
 
     void decodePacket(AVCodecContext* decoder,
@@ -3093,7 +4064,7 @@ private:
                       AVFrame* frame,
                       AVFrame* convertedFrame,
                       SwsContextPtr& scaler,
-                      H264OutputMuxer& outputMuxer,
+                      EncodedOutputSink& outputMuxer,
                       std::chrono::steady_clock::time_point captureStartedAt,
                       std::int64_t& lastFramePts)
     {
@@ -3111,7 +4082,7 @@ private:
                       AVFrame* frame,
                       AVFrame* convertedFrame,
                       SwsContextPtr& scaler,
-                      H264OutputMuxer& outputMuxer,
+                      EncodedOutputSink& outputMuxer,
                       std::chrono::steady_clock::time_point captureStartedAt,
                       std::int64_t& lastFramePts)
     {
@@ -3128,7 +4099,7 @@ private:
                 pts = lastFramePts + 1;
             }
             lastFramePts = pts;
-            outputMuxer.encode(convertFrame(frame, convertedFrame, scaler, outputMuxer, pts));
+            outputMuxer.submitVideoFrame(convertFrame(frame, convertedFrame, scaler, outputMuxer, pts), "analogue");
             av_frame_unref(frame);
         }
     }
@@ -3136,7 +4107,7 @@ private:
     AVFrame* convertFrame(AVFrame* frame,
                           AVFrame* convertedFrame,
                           SwsContextPtr& scaler,
-                          const H264OutputMuxer& outputMuxer,
+                          const EncodedOutputSink& outputMuxer,
                           std::int64_t pts)
     {
         if (frame->format == outputMuxer.pixelFormat()
@@ -3197,15 +4168,670 @@ private:
     }
 
     RepeaterConfig config_;
-    PlutoSink& output_;
-    PersistentRtmpMuxer* rtmp_{};
+    EncodedOutputSink& output_;
     std::optional<ActiveInput> active_;
     std::atomic_bool stopping_{false};
     std::atomic_bool finished_{false};
     std::thread thread_;
 };
 
-class FallbackMuxer {
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+class GStreamerOutputMuxer {
+public:
+    GStreamerOutputMuxer(const RepeaterConfig& config, PlutoSink& output)
+        : config_{config}
+        , output_{output}
+        , width_{outputWidth(config_)}
+        , height_{outputHeight(config_)}
+        , frameRate_{outputFrameRate(config_)}
+    {
+        configureGStreamerRuntime();
+        gst_init(nullptr, nullptr);
+        const auto pipelineText = gstRawOutputPipeline(config_);
+        GError* rawError{};
+        GstElement* rawPipeline = gst_parse_launch(pipelineText.c_str(), &rawError);
+        if (rawError != nullptr) {
+            std::string message{rawError->message != nullptr ? rawError->message : "unknown GStreamer parse error"};
+            g_error_free(rawError);
+            if (rawPipeline != nullptr) {
+                gst_element_set_state(rawPipeline, GST_STATE_NULL);
+                gst_object_unref(rawPipeline);
+            }
+            throw std::runtime_error{"create GStreamer output pipeline failed: " + message};
+        }
+        if (rawPipeline == nullptr) {
+            throw std::runtime_error{"create GStreamer output pipeline returned null"};
+        }
+        pipeline_.reset(rawPipeline);
+
+        rawVideoSrc_ = gst_bin_get_by_name(GST_BIN(pipeline_.get()), "video_src");
+        rawAudioSrc_ = gst_bin_get_by_name(GST_BIN(pipeline_.get()), "audio_src");
+        rawTsSink_ = gst_bin_get_by_name(GST_BIN(pipeline_.get()), "ts_sink");
+        if (rawVideoSrc_ == nullptr || rawAudioSrc_ == nullptr || rawTsSink_ == nullptr) {
+            throw std::runtime_error{"GStreamer output pipeline is missing app elements"};
+        }
+        videoSrcObject_.reset(GST_OBJECT(rawVideoSrc_));
+        audioSrcObject_.reset(GST_OBJECT(rawAudioSrc_));
+        tsSinkObject_.reset(GST_OBJECT(rawTsSink_));
+
+        auto* videoSrc = GST_APP_SRC(rawVideoSrc_);
+        auto* audioSrc = GST_APP_SRC(rawAudioSrc_);
+        gst_app_src_set_stream_type(videoSrc, GST_APP_STREAM_TYPE_STREAM);
+        gst_app_src_set_stream_type(audioSrc, GST_APP_STREAM_TYPE_STREAM);
+        gst_app_src_set_latency(videoSrc, 0, GST_CLOCK_TIME_NONE);
+        gst_app_src_set_latency(audioSrc, 0, GST_CLOCK_TIME_NONE);
+        gst_app_sink_set_emit_signals(GST_APP_SINK(rawTsSink_), false);
+        gst_app_sink_set_drop(GST_APP_SINK(rawTsSink_), false);
+        gst_app_sink_set_max_buffers(GST_APP_SINK(rawTsSink_), 16);
+
+        GstBus* rawBus = gst_element_get_bus(pipeline_.get());
+        if (rawBus == nullptr) {
+            throw std::runtime_error{"GStreamer output pipeline has no bus"};
+        }
+        busObject_.reset(GST_OBJECT(rawBus));
+
+        const auto status = gst_element_set_state(pipeline_.get(), GST_STATE_PLAYING);
+        if (status == GST_STATE_CHANGE_FAILURE) {
+            throw std::runtime_error{"start GStreamer output pipeline failed"};
+        }
+
+        std::cout << "media pipeline using GStreamer "
+                  << (gstV4l2H264EncoderUsable(config_) ? "v4l2h264enc" : "OpenH264")
+                  << " output at "
+                  << width_ << "x" << height_ << " " << frameRate_ << " fps\n";
+        if (config_.streaming.rtmp.enabled && !config_.streaming.rtmp.url.empty()) {
+            std::cout << "media pipeline streaming RTMP through GStreamer to "
+                      << config_.streaming.rtmp.url << '\n';
+        }
+    }
+
+    ~GStreamerOutputMuxer()
+    {
+        try {
+            finish();
+        } catch (const std::exception& ex) {
+            std::cerr << "wh-repeater: GStreamer output finish failed: " << ex.what() << '\n';
+        }
+    }
+
+    GStreamerOutputMuxer(const GStreamerOutputMuxer&) = delete;
+    GStreamerOutputMuxer& operator=(const GStreamerOutputMuxer&) = delete;
+
+    [[nodiscard]] int width() const { return width_; }
+    [[nodiscard]] int height() const { return height_; }
+    [[nodiscard]] int frameRate() const { return frameRate_; }
+    [[nodiscard]] AVPixelFormat pixelFormat() const { return AV_PIX_FMT_YUV420P; }
+
+    void writeVideoFrame(const AVFrame* frame)
+    {
+        if (finished_) {
+            return;
+        }
+        if (frame == nullptr
+            || frame->format != AV_PIX_FMT_YUV420P
+            || frame->width != width_
+            || frame->height != height_
+            || frame->data[0] == nullptr
+            || frame->data[1] == nullptr
+            || frame->data[2] == nullptr) {
+            throw std::runtime_error{"invalid frame passed to GStreamer output"};
+        }
+
+        const auto ySize = static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_);
+        const auto chromaWidth = width_ / 2;
+        const auto chromaHeight = height_ / 2;
+        const auto uvSize = static_cast<std::size_t>(chromaWidth) * static_cast<std::size_t>(chromaHeight);
+        GstBuffer* buffer = gst_buffer_new_allocate(nullptr, ySize + uvSize * 2, nullptr);
+        if (buffer == nullptr) {
+            throw std::runtime_error{"allocate GStreamer video buffer failed"};
+        }
+
+        GstMapInfo map{};
+        if (!gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
+            gst_buffer_unref(buffer);
+            throw std::runtime_error{"map GStreamer video buffer failed"};
+        }
+        auto* dst = map.data;
+        copyPlane(dst, width_, frame->data[0], frame->linesize[0], width_, height_);
+        dst += ySize;
+        copyPlane(dst, chromaWidth, frame->data[1], frame->linesize[1], chromaWidth, chromaHeight);
+        dst += uvSize;
+        copyPlane(dst, chromaWidth, frame->data[2], frame->linesize[2], chromaWidth, chromaHeight);
+        gst_buffer_unmap(buffer, &map);
+
+        const auto pts = frame->pts == AV_NOPTS_VALUE ? videoFrameIndex_ : frame->pts;
+        GST_BUFFER_PTS(buffer) = gst_util_uint64_scale(static_cast<guint64>(pts), GST_SECOND, static_cast<guint64>(frameRate_));
+        GST_BUFFER_DTS(buffer) = GST_BUFFER_PTS(buffer);
+        GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(1, GST_SECOND, static_cast<guint64>(frameRate_));
+        videoFrameIndex_ = std::max(videoFrameIndex_ + 1, pts + 1);
+
+        const auto flow = gst_app_src_push_buffer(GST_APP_SRC(rawVideoSrc_), buffer);
+        if (flow != GST_FLOW_OK) {
+            throw std::runtime_error{"push GStreamer video buffer failed: " + std::to_string(static_cast<int>(flow))};
+        }
+        drain(false);
+    }
+
+    void writeAudioSamples(const float* samples, int count, std::int64_t pts)
+    {
+        if (finished_ || samples == nullptr || count <= 0) {
+            return;
+        }
+        const auto byteSize = static_cast<std::size_t>(count) * sizeof(float);
+        GstBuffer* buffer = gst_buffer_new_allocate(nullptr, byteSize, nullptr);
+        if (buffer == nullptr) {
+            throw std::runtime_error{"allocate GStreamer audio buffer failed"};
+        }
+        GstMapInfo map{};
+        if (!gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
+            gst_buffer_unref(buffer);
+            throw std::runtime_error{"map GStreamer audio buffer failed"};
+        }
+        std::memcpy(map.data, samples, byteSize);
+        gst_buffer_unmap(buffer, &map);
+
+        GST_BUFFER_PTS(buffer) = gst_util_uint64_scale(static_cast<guint64>(pts), GST_SECOND, fallbackAudioSampleRate);
+        GST_BUFFER_DTS(buffer) = GST_BUFFER_PTS(buffer);
+        GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(static_cast<guint64>(count), GST_SECOND, fallbackAudioSampleRate);
+
+        const auto flow = gst_app_src_push_buffer(GST_APP_SRC(rawAudioSrc_), buffer);
+        if (flow != GST_FLOW_OK) {
+            throw std::runtime_error{"push GStreamer audio buffer failed: " + std::to_string(static_cast<int>(flow))};
+        }
+        drain(false);
+    }
+
+    void finish()
+    {
+        if (finished_) {
+            return;
+        }
+        finished_ = true;
+        if (rawVideoSrc_ != nullptr) {
+            gst_app_src_end_of_stream(GST_APP_SRC(rawVideoSrc_));
+        }
+        if (rawAudioSrc_ != nullptr) {
+            gst_app_src_end_of_stream(GST_APP_SRC(rawAudioSrc_));
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+        while (std::chrono::steady_clock::now() < deadline && drain(true)) {
+        }
+        if (pipeline_) {
+            gst_element_set_state(pipeline_.get(), GST_STATE_NULL);
+        }
+    }
+
+private:
+    static void copyPlane(std::uint8_t* dst,
+                          int dstStride,
+                          const std::uint8_t* src,
+                          int srcStride,
+                          int width,
+                          int height)
+    {
+        for (int row = 0; row < height; ++row) {
+            std::memcpy(dst + static_cast<std::size_t>(row) * dstStride,
+                        src + static_cast<std::size_t>(row) * srcStride,
+                        static_cast<std::size_t>(width));
+        }
+    }
+
+    bool drain(bool waitForEos)
+    {
+        bool sawWork = false;
+        for (;;) {
+            checkBus(waitForEos ? 50 * GST_MSECOND : 0);
+            GstSamplePtr sample{waitForEos
+                    ? gst_app_sink_try_pull_sample(GST_APP_SINK(rawTsSink_), 50 * GST_MSECOND)
+                    : gst_app_sink_try_pull_sample(GST_APP_SINK(rawTsSink_), 0)};
+            if (!sample) {
+                break;
+            }
+            sawWork = true;
+            GstBuffer* buffer = gst_sample_get_buffer(sample.get());
+            if (buffer == nullptr) {
+                continue;
+            }
+            GstMapInfo map{};
+            if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                continue;
+            }
+            output_.writeMuxData(std::span<const std::byte>{
+                reinterpret_cast<const std::byte*>(map.data),
+                map.size,
+            });
+            gst_buffer_unmap(buffer, &map);
+        }
+        checkBus(0);
+        return sawWork;
+    }
+
+    void checkBus(GstClockTime timeout)
+    {
+        auto* bus = GST_BUS(busObject_.get());
+        while (bus != nullptr) {
+            GstMessagePtr message{timeout > 0
+                    ? gst_bus_timed_pop_filtered(bus, timeout, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS))
+                    : gst_bus_pop_filtered(bus, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS))};
+            if (!message) {
+                break;
+            }
+            timeout = 0;
+            if (GST_MESSAGE_TYPE(message.get()) == GST_MESSAGE_EOS) {
+                eosSeen_ = true;
+                continue;
+            }
+            if (GST_MESSAGE_TYPE(message.get()) == GST_MESSAGE_ERROR) {
+                GError* error{};
+                gchar* debug{};
+                gst_message_parse_error(message.get(), &error, &debug);
+                std::string errorText{error != nullptr && error->message != nullptr ? error->message : "unknown GStreamer error"};
+                if (debug != nullptr && debug[0] != '\0') {
+                    errorText += " (";
+                    errorText += debug;
+                    errorText += ")";
+                }
+                if (error != nullptr) {
+                    g_error_free(error);
+                }
+                g_free(debug);
+                throw std::runtime_error{errorText};
+            }
+        }
+    }
+
+    const RepeaterConfig& config_;
+    PlutoSink& output_;
+    int width_{};
+    int height_{};
+    int frameRate_{};
+    GstElementPtr pipeline_;
+    GstObjectPtr videoSrcObject_;
+    GstObjectPtr audioSrcObject_;
+    GstObjectPtr tsSinkObject_;
+    GstObjectPtr busObject_;
+    GstElement* rawVideoSrc_{};
+    GstElement* rawAudioSrc_{};
+    GstElement* rawTsSink_{};
+    std::int64_t videoFrameIndex_{0};
+    bool eosSeen_{false};
+    bool finished_{false};
+};
+
+class GStreamerLiveTranscoder {
+public:
+    GStreamerLiveTranscoder(RepeaterConfig config, PlutoSink& output)
+        : config_{std::move(config)}
+        , output_{output}
+        , thread_{[this] {
+            run();
+        }}
+    {
+    }
+
+    ~GStreamerLiveTranscoder()
+    {
+        stop();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    GStreamerLiveTranscoder(const GStreamerLiveTranscoder&) = delete;
+    GStreamerLiveTranscoder& operator=(const GStreamerLiveTranscoder&) = delete;
+
+    void append(std::span<const std::byte> packet)
+    {
+        input_.append(packet);
+    }
+
+    void stop()
+    {
+        stopping_.store(true);
+        input_.stop();
+    }
+
+    [[nodiscard]] bool finished() const
+    {
+        return finished_.load();
+    }
+
+    [[nodiscard]] bool ready() const
+    {
+        return ready_.load();
+    }
+
+    [[nodiscard]] std::string error() const
+    {
+        return error_;
+    }
+
+private:
+    void run()
+    {
+        try {
+            transcodeLoop();
+        } catch (const std::exception& ex) {
+            error_ = ex.what();
+            std::cerr << "wh-repeater: GStreamer live transcode stopped: " << ex.what() << '\n';
+        }
+        finished_.store(true);
+    }
+
+    void transcodeLoop()
+    {
+        configureGStreamerRuntime();
+        gst_init(nullptr, nullptr);
+        const auto pipelineText = gstLiveTsPipeline(config_);
+        GError* rawError{};
+        GstElement* rawPipeline = gst_parse_launch(pipelineText.c_str(), &rawError);
+        if (rawError != nullptr) {
+            std::string message{rawError->message != nullptr ? rawError->message : "unknown GStreamer parse error"};
+            g_error_free(rawError);
+            if (rawPipeline != nullptr) {
+                gst_element_set_state(rawPipeline, GST_STATE_NULL);
+                gst_object_unref(rawPipeline);
+            }
+            throw std::runtime_error{"create GStreamer live pipeline failed: " + message};
+        }
+        if (rawPipeline == nullptr) {
+            throw std::runtime_error{"create GStreamer live pipeline returned null"};
+        }
+        pipeline_.reset(rawPipeline);
+
+        rawInput_ = gst_bin_get_by_name(GST_BIN(pipeline_.get()), "ts_src");
+        rawTsSink_ = gst_bin_get_by_name(GST_BIN(pipeline_.get()), "ts_sink");
+        if (rawInput_ == nullptr || rawTsSink_ == nullptr) {
+            throw std::runtime_error{"GStreamer live pipeline is missing app elements"};
+        }
+        inputObject_.reset(GST_OBJECT(rawInput_));
+        sinkObject_.reset(GST_OBJECT(rawTsSink_));
+        gst_app_src_set_stream_type(GST_APP_SRC(rawInput_), GST_APP_STREAM_TYPE_STREAM);
+        gst_app_sink_set_emit_signals(GST_APP_SINK(rawTsSink_), false);
+        gst_app_sink_set_drop(GST_APP_SINK(rawTsSink_), false);
+        gst_app_sink_set_max_buffers(GST_APP_SINK(rawTsSink_), 16);
+
+        GstBus* rawBus = gst_element_get_bus(pipeline_.get());
+        if (rawBus == nullptr) {
+            throw std::runtime_error{"GStreamer live pipeline has no bus"};
+        }
+        busObject_.reset(GST_OBJECT(rawBus));
+
+        const auto status = gst_element_set_state(pipeline_.get(), GST_STATE_PLAYING);
+        if (status == GST_STATE_CHANGE_FAILURE) {
+            throw std::runtime_error{"start GStreamer live pipeline failed"};
+        }
+        std::cout << "media pipeline retranscoding received TS through GStreamer at "
+                  << outputWidth(config_) << "x" << outputHeight(config_) << " "
+                  << outputFrameRate(config_) << " fps\n";
+
+        std::array<std::byte, 1316 * 8> buffer{};
+        while (!stopping_.load()) {
+            const auto bytes = input_.read(reinterpret_cast<std::uint8_t*>(buffer.data()), static_cast<int>(buffer.size()));
+            if (bytes == AVERROR_EOF) {
+                break;
+            }
+            if (bytes < 0) {
+                continue;
+            }
+            pushInput(std::span<const std::byte>{buffer.data(), static_cast<std::size_t>(bytes)});
+            drain(false);
+        }
+    }
+
+    void pushInput(std::span<const std::byte> data)
+    {
+        GstBuffer* buffer = gst_buffer_new_allocate(nullptr, data.size(), nullptr);
+        if (buffer == nullptr) {
+            throw std::runtime_error{"allocate GStreamer TS input buffer failed"};
+        }
+        GstMapInfo map{};
+        if (!gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
+            gst_buffer_unref(buffer);
+            throw std::runtime_error{"map GStreamer TS input buffer failed"};
+        }
+        std::memcpy(map.data, data.data(), data.size());
+        gst_buffer_unmap(buffer, &map);
+        const auto flow = gst_app_src_push_buffer(GST_APP_SRC(rawInput_), buffer);
+        if (flow != GST_FLOW_OK) {
+            throw std::runtime_error{"push GStreamer TS input failed: " + std::to_string(static_cast<int>(flow))};
+        }
+    }
+
+    void drain(bool wait)
+    {
+        for (;;) {
+            checkBus(wait ? 50 * GST_MSECOND : 0);
+            GstSamplePtr sample{wait
+                    ? gst_app_sink_try_pull_sample(GST_APP_SINK(rawTsSink_), 50 * GST_MSECOND)
+                    : gst_app_sink_try_pull_sample(GST_APP_SINK(rawTsSink_), 0)};
+            if (!sample) {
+                break;
+            }
+            GstBuffer* buffer = gst_sample_get_buffer(sample.get());
+            if (buffer == nullptr) {
+                continue;
+            }
+            GstMapInfo map{};
+            if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                continue;
+            }
+            ready_.store(true);
+            output_.writeMuxData(std::span<const std::byte>{
+                reinterpret_cast<const std::byte*>(map.data),
+                map.size,
+            });
+            gst_buffer_unmap(buffer, &map);
+        }
+        checkBus(0);
+    }
+
+    void checkBus(GstClockTime timeout)
+    {
+        auto* bus = GST_BUS(busObject_.get());
+        while (bus != nullptr) {
+            GstMessagePtr message{timeout > 0
+                    ? gst_bus_timed_pop_filtered(bus, timeout, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS))
+                    : gst_bus_pop_filtered(bus, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS))};
+            if (!message) {
+                break;
+            }
+            timeout = 0;
+            if (GST_MESSAGE_TYPE(message.get()) == GST_MESSAGE_EOS) {
+                return;
+            }
+            if (GST_MESSAGE_TYPE(message.get()) == GST_MESSAGE_ERROR) {
+                GError* error{};
+                gchar* debug{};
+                gst_message_parse_error(message.get(), &error, &debug);
+                std::string errorText{error != nullptr && error->message != nullptr ? error->message : "unknown GStreamer error"};
+                if (debug != nullptr && debug[0] != '\0') {
+                    errorText += " (";
+                    errorText += debug;
+                    errorText += ")";
+                }
+                if (error != nullptr) {
+                    g_error_free(error);
+                }
+                g_free(debug);
+                throw std::runtime_error{errorText};
+            }
+        }
+    }
+
+    RepeaterConfig config_;
+    PlutoSink& output_;
+    BlockingTsInput input_;
+    GstElementPtr pipeline_;
+    GstObjectPtr inputObject_;
+    GstObjectPtr sinkObject_;
+    GstObjectPtr busObject_;
+    GstElement* rawInput_{};
+    GstElement* rawTsSink_{};
+    std::atomic_bool stopping_{false};
+    std::atomic_bool ready_{false};
+    std::atomic_bool finished_{false};
+    std::string error_;
+    std::thread thread_;
+};
+
+class GStreamerAnalogueCaptureTranscoder {
+public:
+    GStreamerAnalogueCaptureTranscoder(RepeaterConfig config, PlutoSink& output)
+        : config_{std::move(config)}
+        , output_{output}
+        , thread_{[this] {
+            run();
+        }}
+    {
+    }
+
+    ~GStreamerAnalogueCaptureTranscoder()
+    {
+        stopping_.store(true);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    GStreamerAnalogueCaptureTranscoder(const GStreamerAnalogueCaptureTranscoder&) = delete;
+    GStreamerAnalogueCaptureTranscoder& operator=(const GStreamerAnalogueCaptureTranscoder&) = delete;
+
+    [[nodiscard]] bool finished() const
+    {
+        return finished_.load();
+    }
+
+private:
+    void run()
+    {
+        try {
+            captureLoop();
+        } catch (const std::exception& ex) {
+            std::cerr << "wh-repeater: GStreamer analogue capture stopped: " << ex.what() << '\n';
+        }
+        finished_.store(true);
+    }
+
+    void captureLoop()
+    {
+        configureGStreamerRuntime();
+        gst_init(nullptr, nullptr);
+        const auto pipelineText = gstAnalogueCapturePipeline(config_);
+        GError* rawError{};
+        GstElement* rawPipeline = gst_parse_launch(pipelineText.c_str(), &rawError);
+        if (rawError != nullptr) {
+            std::string message{rawError->message != nullptr ? rawError->message : "unknown GStreamer parse error"};
+            g_error_free(rawError);
+            if (rawPipeline != nullptr) {
+                gst_element_set_state(rawPipeline, GST_STATE_NULL);
+                gst_object_unref(rawPipeline);
+            }
+            throw std::runtime_error{"create GStreamer analogue pipeline failed: " + message};
+        }
+        if (rawPipeline == nullptr) {
+            throw std::runtime_error{"create GStreamer analogue pipeline returned null"};
+        }
+        pipeline_.reset(rawPipeline);
+
+        rawTsSink_ = gst_bin_get_by_name(GST_BIN(pipeline_.get()), "ts_sink");
+        if (rawTsSink_ == nullptr) {
+            throw std::runtime_error{"GStreamer analogue pipeline is missing TS appsink"};
+        }
+        sinkObject_.reset(GST_OBJECT(rawTsSink_));
+        gst_app_sink_set_emit_signals(GST_APP_SINK(rawTsSink_), false);
+        gst_app_sink_set_drop(GST_APP_SINK(rawTsSink_), false);
+        gst_app_sink_set_max_buffers(GST_APP_SINK(rawTsSink_), 16);
+
+        GstBus* rawBus = gst_element_get_bus(pipeline_.get());
+        if (rawBus == nullptr) {
+            throw std::runtime_error{"GStreamer analogue pipeline has no bus"};
+        }
+        busObject_.reset(GST_OBJECT(rawBus));
+
+        const auto status = gst_element_set_state(pipeline_.get(), GST_STATE_PLAYING);
+        if (status == GST_STATE_CHANGE_FAILURE) {
+            throw std::runtime_error{"start GStreamer analogue pipeline failed"};
+        }
+        std::cout << "media pipeline capturing analogue through GStreamer from "
+                  << config_.analogue.capture.captureDevice << '\n';
+
+        while (!stopping_.load()) {
+            drain(true);
+        }
+    }
+
+    void drain(bool wait)
+    {
+        checkBus(wait ? 100 * GST_MSECOND : 0);
+        GstSamplePtr sample{wait
+                ? gst_app_sink_try_pull_sample(GST_APP_SINK(rawTsSink_), 100 * GST_MSECOND)
+                : gst_app_sink_try_pull_sample(GST_APP_SINK(rawTsSink_), 0)};
+        if (!sample) {
+            return;
+        }
+        GstBuffer* buffer = gst_sample_get_buffer(sample.get());
+        if (buffer == nullptr) {
+            return;
+        }
+        GstMapInfo map{};
+        if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+            return;
+        }
+        output_.writeMuxData(std::span<const std::byte>{
+            reinterpret_cast<const std::byte*>(map.data),
+            map.size,
+        });
+        gst_buffer_unmap(buffer, &map);
+    }
+
+    void checkBus(GstClockTime timeout)
+    {
+        auto* bus = GST_BUS(busObject_.get());
+        while (bus != nullptr) {
+            GstMessagePtr message{timeout > 0
+                    ? gst_bus_timed_pop_filtered(bus, timeout, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS))
+                    : gst_bus_pop_filtered(bus, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS))};
+            if (!message) {
+                break;
+            }
+            timeout = 0;
+            if (GST_MESSAGE_TYPE(message.get()) == GST_MESSAGE_EOS) {
+                stopping_.store(true);
+                return;
+            }
+            if (GST_MESSAGE_TYPE(message.get()) == GST_MESSAGE_ERROR) {
+                GError* error{};
+                gchar* debug{};
+                gst_message_parse_error(message.get(), &error, &debug);
+                std::string errorText{error != nullptr && error->message != nullptr ? error->message : "unknown GStreamer error"};
+                if (debug != nullptr && debug[0] != '\0') {
+                    errorText += " (";
+                    errorText += debug;
+                    errorText += ")";
+                }
+                if (error != nullptr) {
+                    g_error_free(error);
+                }
+                g_free(debug);
+                throw std::runtime_error{errorText};
+            }
+        }
+    }
+
+    RepeaterConfig config_;
+    PlutoSink& output_;
+    GstElementPtr pipeline_;
+    GstObjectPtr sinkObject_;
+    GstObjectPtr busObject_;
+    GstElement* rawTsSink_{};
+    std::atomic_bool stopping_{false};
+    std::atomic_bool finished_{false};
+    std::thread thread_;
+};
+#endif
+
+class FallbackMuxer : public EncodedOutputSink {
 public:
     FallbackMuxer(const RepeaterConfig& config, PlutoSink& output, PersistentRtmpMuxer* rtmp)
         : config_{config}
@@ -3230,6 +4856,12 @@ public:
         } catch (const std::exception& ex) {
             std::cerr << "wh-repeater: fallback audio flush failed: " << ex.what() << '\n';
         }
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+        if (gstMuxer_) {
+            gstMuxer_->finish();
+            return;
+        }
+#endif
         if (headerWritten_) {
             av_write_trailer(format_);
         }
@@ -3251,8 +4883,46 @@ public:
     FallbackMuxer(const FallbackMuxer&) = delete;
     FallbackMuxer& operator=(const FallbackMuxer&) = delete;
 
+    [[nodiscard]] AVPixelFormat pixelFormat() const override
+    {
+        return outputPixelFormat();
+    }
+
+    [[nodiscard]] int width() const override
+    {
+        return outputWidthPixels();
+    }
+
+    [[nodiscard]] int height() const override
+    {
+        return outputHeightPixels();
+    }
+
+    [[nodiscard]] int frameRateValue() const override
+    {
+        return frameRate_;
+    }
+
+    [[nodiscard]] AVCodecContext* audioCodec() const override
+    {
+        return audioCodec_;
+    }
+
+    [[nodiscard]] std::int64_t nextVideoPts() const override
+    {
+        std::lock_guard lock{outputMutex_};
+        return lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
+    }
+
+    [[nodiscard]] std::int64_t nextAudioPts() const override
+    {
+        std::lock_guard lock{outputMutex_};
+        return audioSampleIndex_;
+    }
+
     void setNotice(std::optional<std::string> notice)
     {
+        std::lock_guard lock{outputMutex_};
         if (notice_ == notice) {
             return;
         }
@@ -3260,10 +4930,159 @@ public:
         cachedSlate_.reset();
     }
 
+    void setStreamInfo(std::optional<std::string> streamInfo) override
+    {
+        std::lock_guard lock{outputMutex_};
+        if (streamInfo_ == streamInfo) {
+            return;
+        }
+        streamInfo_ = std::move(streamInfo);
+        streamInfoOverlay_.reset();
+        liveInfoFramesRemaining_ = streamInfo_.has_value() && !streamInfo_->empty() ? std::max(1, frameRate_) * 10 : 0;
+        cachedComposited_.reset();
+    }
+
     void writeFrame(std::int64_t frameIndex)
+    {
+        std::lock_guard lock{outputMutex_};
+        writeFrameLocked(frameIndex, false);
+    }
+
+    void writeFrame(std::int64_t frameIndex, bool preferSubmittedVideo)
+    {
+        std::lock_guard lock{outputMutex_};
+        writeFrameLocked(frameIndex, preferSubmittedVideo);
+    }
+
+    void submitVideoFrame(AVFrame* frame, std::string_view source) override
+    {
+        std::lock_guard lock{outputMutex_};
+        if (frame == nullptr
+            || frame->format != outputPixelFormat()
+            || frame->width != outputWidthPixels()
+            || frame->height != outputHeightPixels()
+            || frame->data[0] == nullptr
+            || frame->linesize[0] <= 0) {
+            std::cerr << "wh-repeater: " << source << " frame rejected before muxer queue\n";
+            return;
+        }
+        FramePtr clone{av_frame_clone(frame)};
+        if (!clone) {
+            throw std::runtime_error{"clone submitted video frame failed"};
+        }
+        normaliseVideoFrameProperties(*clone);
+        const auto sourceText = std::string{source};
+        if (sourceText == "fallback-video") {
+            constexpr std::size_t maxQueuedVideoFrames{8};
+            while (submittedVideoFrames_.size() >= maxQueuedVideoFrames) {
+                submittedVideoConsumed_.wait_for(outputMutex_, std::chrono::milliseconds{100});
+                if (submittedVideoFrames_.size() >= maxQueuedVideoFrames) {
+                    submittedVideoFrames_.pop_front();
+                }
+            }
+        } else {
+            submittedVideoFrames_.clear();
+        }
+        submittedVideoFrames_.push_back(std::move(clone));
+        submittedVideoSource_ = sourceText;
+        submittedVideoAt_ = std::chrono::steady_clock::now();
+    }
+
+    void submitAudioFrame(AVFrame* frame, std::string_view source) override
+    {
+        std::unique_lock lock{outputMutex_};
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+        if (gstMuxer_) {
+            return;
+        }
+#endif
+        if (audioCodec_ == nullptr
+            || frame == nullptr
+            || frame->format != audioCodec_->sample_fmt
+            || frame->sample_rate != audioCodec_->sample_rate
+            || frame->nb_samples <= 0
+            || av_channel_layout_compare(&frame->ch_layout, &audioCodec_->ch_layout) != 0
+            || frame->extended_data == nullptr
+            || frame->extended_data[0] == nullptr) {
+            std::cerr << "wh-repeater: " << source << " audio frame rejected before muxer queue\n";
+            return;
+        }
+        if (!submittedAudioFifo_) {
+            submittedAudioFifo_.reset(av_audio_fifo_alloc(audioCodec_->sample_fmt,
+                                                          audioCodec_->ch_layout.nb_channels,
+                                                          audioCodec_->sample_rate));
+            if (!submittedAudioFifo_) {
+                throw std::runtime_error{"allocate submitted audio FIFO failed"};
+            }
+        }
+        const auto maxSubmittedAudioSamples = audioCodec_->sample_rate * 2;
+        const auto backpressureDeadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+        while (av_audio_fifo_size(submittedAudioFifo_.get()) + frame->nb_samples > maxSubmittedAudioSamples) {
+            submittedAudioConsumed_.wait_for(lock, std::chrono::milliseconds{100});
+            if (av_audio_fifo_size(submittedAudioFifo_.get()) + frame->nb_samples > maxSubmittedAudioSamples) {
+                std::cerr << "wh-repeater: live audio queue still full; applying decode backpressure\n";
+            }
+            if (std::chrono::steady_clock::now() >= backpressureDeadline
+                && av_audio_fifo_size(submittedAudioFifo_.get()) + frame->nb_samples > maxSubmittedAudioSamples) {
+                const auto dropSamples = std::min(frame->nb_samples, av_audio_fifo_size(submittedAudioFifo_.get()));
+                std::cerr << "wh-repeater: live audio queue full for too long; dropping "
+                          << dropSamples << " samples to avoid worker stall\n";
+                av_audio_fifo_drain(submittedAudioFifo_.get(), dropSamples);
+                break;
+            }
+        }
+        checkAv(av_audio_fifo_realloc(submittedAudioFifo_.get(),
+                                      av_audio_fifo_size(submittedAudioFifo_.get()) + frame->nb_samples),
+                "grow submitted audio FIFO");
+        if (av_audio_fifo_write(submittedAudioFifo_.get(),
+                                reinterpret_cast<void**>(frame->extended_data),
+                                frame->nb_samples) < frame->nb_samples) {
+            throw std::runtime_error{"write submitted audio FIFO failed"};
+        }
+    }
+
+private:
+    void writeFrameLocked(std::int64_t frameIndex, bool preferSubmittedVideo)
     {
         FramePtr frame;
         const AVFrame* contentIdentity{};
+        const auto submittedVideoHold = submittedVideoSource_ == "fallback-video"
+            ? std::chrono::milliseconds{750}
+            : std::chrono::seconds{5};
+        const auto submittedVideoFresh = !submittedVideoFrames_.empty()
+            && std::chrono::steady_clock::now() - submittedVideoAt_ < submittedVideoHold;
+        if (preferSubmittedVideo && submittedVideoFresh) {
+            if (submittedVideoSource_ == "fallback-video") {
+                frame = std::move(submittedVideoFrames_.front());
+                submittedVideoFrames_.pop_front();
+                submittedVideoConsumed_.notify_one();
+            } else {
+                frame.reset(av_frame_clone(submittedVideoFrames_.back().get()));
+            }
+            if (!frame) {
+                throw std::runtime_error{"submitted video frame missing"};
+            }
+            frame->pts = frameIndex;
+            auto overlayFrame = identOverlay_->render(frame.get());
+            overlayFrame->pts = frameIndex;
+            if (streamInfoOverlay_ == nullptr && liveInfoFramesRemaining_ > 0
+                && streamInfo_.has_value() && !streamInfo_->empty()) {
+                streamInfoOverlay_ = std::make_unique<OverlayRenderer>(streamInfoFilter(*streamInfo_, frameRate_),
+                                                                        outputWidthPixels(),
+                                                                        outputHeightPixels(),
+                                                                        outputPixelFormat(),
+                                                                        frameRate_);
+            }
+            if (streamInfoOverlay_ != nullptr && liveInfoFramesRemaining_ > 0) {
+                overlayFrame = streamInfoOverlay_->render(overlayFrame.get());
+                overlayFrame->pts = frameIndex;
+                --liveInfoFramesRemaining_;
+            }
+            encode(overlayFrame.get(), submittedVideoSource_);
+            writeAudioUntil(frameIndex + 1, true);
+            return;
+        }
+
         if (notice_.has_value()) {
             if (!cachedSlate_) {
                 cachedSlate_ = renderSlateFrame(config_, *notice_, frameRate_);
@@ -3294,10 +5113,9 @@ public:
         frame->pts = frameIndex;
         auto compositedFrame = compositedFallbackFrame(frame.get(), contentIdentity, frameIndex);
         encode(compositedFrame.get());
-        writeAudioUntil(frameIndex + 1);
+        writeAudioUntil(frameIndex + 1, false);
     }
 
-private:
     FramePtr compositedFallbackFrame(AVFrame* frame, const AVFrame* contentIdentity, std::int64_t frameIndex)
     {
         const auto secondIndex = frameIndex / std::max(1, frameRate_);
@@ -3316,13 +5134,27 @@ private:
         overlayFrame->pts = frameIndex;
         auto clockFrame = clockOverlay(frameIndex).render(overlayFrame.get());
         clockFrame->pts = frameIndex;
-        cachedComposited_ = FramePtr{av_frame_clone(clockFrame.get())};
+        auto* finalFrame = clockFrame.get();
+        FramePtr streamInfoFrame;
+        if (streamInfo_.has_value() && !streamInfo_->empty()) {
+            if (!streamInfoOverlay_) {
+                streamInfoOverlay_ = std::make_unique<OverlayRenderer>(streamInfoFilter(*streamInfo_, frameRate_),
+                                                                        outputWidthPixels(),
+                                                                        outputHeightPixels(),
+                                                                        outputPixelFormat(),
+                                                                        frameRate_);
+            }
+            streamInfoFrame = streamInfoOverlay_->render(finalFrame);
+            streamInfoFrame->pts = frameIndex;
+            finalFrame = streamInfoFrame.get();
+        }
+        cachedComposited_ = FramePtr{av_frame_clone(finalFrame)};
         if (!cachedComposited_) {
             throw std::runtime_error{"cache composited fallback frame failed"};
         }
         cachedCompositedIdentity_ = contentIdentity;
         cachedCompositedSecondIndex_ = secondIndex;
-        return clockFrame;
+        return streamInfoFrame ? std::move(streamInfoFrame) : std::move(clockFrame);
     }
 
     OverlayRenderer& clockOverlay(std::int64_t frameIndex)
@@ -3331,9 +5163,9 @@ private:
         if (!clockOverlay_ || clockSecondIndex_ != secondIndex) {
             clockSecondIndex_ = secondIndex;
             clockOverlay_ = std::make_unique<OverlayRenderer>(fallbackClockFilter(fallbackClockText()),
-                                                              codec_->width,
-                                                              codec_->height,
-                                                              codec_->pix_fmt,
+                                                              outputWidthPixels(),
+                                                              outputHeightPixels(),
+                                                              outputPixelFormat(),
                                                               frameRate_);
         }
         return *clockOverlay_;
@@ -3388,6 +5220,18 @@ private:
 
     void initialise()
     {
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+        if (config_.media.backend == "gstreamer") {
+            gstMuxer_ = std::make_unique<GStreamerOutputMuxer>(config_, output_);
+            identOverlay_ = std::make_unique<OverlayRenderer>(identFilter(identText(config_)),
+                                                              outputWidthPixels(),
+                                                              outputHeightPixels(),
+                                                              outputPixelFormat(),
+                                                              frameRate_);
+            audioFrameSamples_ = 1024;
+            return;
+        }
+#endif
         checkAv(avformat_alloc_output_context2(&format_, nullptr, "mpegts", nullptr), "allocate MPEG-TS muxer");
         avioBuffer_ = static_cast<std::uint8_t*>(av_malloc(32768));
         if (avioBuffer_ == nullptr) {
@@ -3469,11 +5313,22 @@ private:
         audioFrameSamples_ = audioCodec_->frame_size > 0 ? audioCodec_->frame_size : 1024;
     }
 
-    void encode(AVFrame* frame)
+    void encode(AVFrame* frame, std::string_view source = "fallback")
     {
         FramePtr generatedFrame;
-        auto* safeFrame = fixedVideoFrame(frame, generatedFrame);
-        checkAv(avcodec_send_frame(codec_, safeFrame), "send fallback frame");
+        auto* safeFrame = fixedVideoFrame(frame, source, generatedFrame);
+        sendVideoFrame(safeFrame);
+    }
+
+    void sendVideoFrame(AVFrame* safeFrame)
+    {
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+        if (gstMuxer_) {
+            gstMuxer_->writeVideoFrame(safeFrame);
+            return;
+        }
+#endif
+        checkAv(avcodec_send_frame(codec_, safeFrame), "send output frame");
         PacketPtr packet{av_packet_alloc()};
         if (!packet) {
             throw std::runtime_error{"allocate fallback packet failed"};
@@ -3501,9 +5356,9 @@ private:
         if (!frame) {
             throw std::runtime_error{"allocate generated fallback frame failed"};
         }
-        frame->format = codec_->pix_fmt;
-        frame->width = codec_->width;
-        frame->height = codec_->height;
+        frame->format = outputPixelFormat();
+        frame->width = outputWidthPixels();
+        frame->height = outputHeightPixels();
         frame->pts = pts;
         checkAv(av_frame_get_buffer(frame.get(), 32), "allocate generated fallback frame buffer");
         checkAv(av_frame_make_writable(frame.get()), "make generated fallback frame writable");
@@ -3511,28 +5366,74 @@ private:
         return frame;
     }
 
-    AVFrame* fixedVideoFrame(AVFrame* frame, FramePtr& generatedFrame)
+    AVFrame* fixedVideoFrame(AVFrame* frame, std::string_view source, FramePtr& generatedFrame)
     {
         std::int64_t pts = frame != nullptr ? frame->pts : AV_NOPTS_VALUE;
         if (pts == AV_NOPTS_VALUE || (lastVideoPts_ != AV_NOPTS_VALUE && pts <= lastVideoPts_)) {
             pts = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
-            std::cerr << "wh-repeater: fallback frame timestamp repaired to " << pts << '\n';
+            std::cerr << "wh-repeater: " << source << " frame timestamp repaired to " << pts << '\n';
         }
 
         const bool valid = frame != nullptr
-            && frame->format == codec_->pix_fmt
-            && frame->width == codec_->width
-            && frame->height == codec_->height
+            && frame->format == outputPixelFormat()
+            && frame->width == outputWidthPixels()
+            && frame->height == outputHeightPixels()
             && frame->data[0] != nullptr
             && frame->linesize[0] > 0;
 
         lastVideoPts_ = pts;
         if (!valid) {
-            std::cerr << "wh-repeater: fallback frame rejected before encoder; sending generated frame\n";
+            std::cerr << "wh-repeater: " << source << " frame rejected before encoder; sending generated frame\n";
             generatedFrame = generatedVideoFrame(pts);
             return generatedFrame.get();
         }
         frame->pts = pts;
+        normaliseVideoFrameProperties(*frame);
+        return frame;
+    }
+
+    FramePtr generatedAudioFrame(std::int64_t pts, int samples)
+    {
+        FramePtr frame{av_frame_alloc()};
+        if (!frame) {
+            throw std::runtime_error{"allocate generated output audio frame failed"};
+        }
+        frame->format = audioCodec_->sample_fmt;
+        frame->sample_rate = audioCodec_->sample_rate;
+        frame->nb_samples = std::max(1, samples);
+        frame->pts = pts;
+        checkAv(av_channel_layout_copy(&frame->ch_layout, &audioCodec_->ch_layout), "copy generated output audio layout");
+        checkAv(av_frame_get_buffer(frame.get(), 0), "allocate generated output audio buffer");
+        checkAv(av_frame_make_writable(frame.get()), "make generated output audio writable");
+        for (int channel = 0; channel < frame->ch_layout.nb_channels; ++channel) {
+            if (frame->extended_data[channel] != nullptr) {
+                std::memset(frame->extended_data[channel], 0, static_cast<std::size_t>(frame->linesize[0]));
+            }
+        }
+        return frame;
+    }
+
+    AVFrame* fixedAudioFrame(AVFrame* frame, std::string_view source, FramePtr& generatedFrame)
+    {
+        const auto expectedSamples = audioCodec_->frame_size > 0 ? audioCodec_->frame_size : 1024;
+        const auto pts = audioSampleIndex_;
+
+        const bool valid = frame != nullptr
+            && frame->format == audioCodec_->sample_fmt
+            && frame->sample_rate == audioCodec_->sample_rate
+            && frame->nb_samples > 0
+            && av_channel_layout_compare(&frame->ch_layout, &audioCodec_->ch_layout) == 0
+            && frame->extended_data != nullptr
+            && frame->extended_data[0] != nullptr;
+
+        if (!valid) {
+            std::cerr << "wh-repeater: " << source << " audio frame rejected before encoder; sending silence\n";
+            generatedFrame = generatedAudioFrame(pts, expectedSamples);
+            audioSampleIndex_ = pts + generatedFrame->nb_samples;
+            return generatedFrame.get();
+        }
+        frame->pts = pts;
+        audioSampleIndex_ = pts + frame->nb_samples;
         return frame;
     }
 
@@ -3567,20 +5468,48 @@ private:
         return unit < morseUnits_.size() && morseUnits_[unit];
     }
 
-    void writeAudioUntil(std::int64_t nextVideoFrame)
+    void writeAudioUntil(std::int64_t nextVideoFrame, bool preferSubmittedAudio)
     {
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+        if (gstMuxer_) {
+            const auto targetSample = nextVideoFrame * fallbackAudioSampleRate / frameRate_;
+            while (audioSampleIndex_ + audioFrameSamples_ <= targetSample) {
+                writeAudioFrame(audioFrameSamples_, preferSubmittedAudio);
+            }
+            return;
+        }
+#endif
         if (audioCodec_ == nullptr || audioStream_ == nullptr || !headerWritten_) {
             return;
         }
 
         const auto targetSample = nextVideoFrame * fallbackAudioSampleRate / frameRate_;
         while (audioSampleIndex_ + audioFrameSamples_ <= targetSample) {
-            writeAudioFrame(audioFrameSamples_);
+            writeAudioFrame(audioFrameSamples_, preferSubmittedAudio);
         }
     }
 
-    void writeAudioFrame(int samples)
+    void writeAudioFrame(int samples, bool preferSubmittedAudio)
     {
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+        if (gstMuxer_) {
+            std::vector<float> audio(static_cast<std::size_t>(samples));
+            for (int index = 0; index < samples; ++index) {
+                const auto sample = audioSampleIndex_ + index;
+                if (morseToneAtSample(sample)) {
+                    const auto phase = 2.0 * pi * static_cast<double>(config_.ident.morseToneHz) * static_cast<double>(sample - identStartSample_)
+                        / static_cast<double>(fallbackAudioSampleRate);
+                    audio[static_cast<std::size_t>(index)] = static_cast<float>(0.22 * std::sin(phase));
+                } else {
+                    audio[static_cast<std::size_t>(index)] = 0.0F;
+                }
+            }
+            const auto pts = audioSampleIndex_;
+            audioSampleIndex_ += samples;
+            gstMuxer_->writeAudioSamples(audio.data(), samples, pts);
+            return;
+        }
+#endif
         FramePtr frame{av_frame_alloc()};
         if (!frame) {
             throw std::runtime_error{"allocate fallback audio frame failed"};
@@ -3593,25 +5522,44 @@ private:
         checkAv(av_frame_get_buffer(frame.get(), 0), "allocate fallback audio frame buffer");
         checkAv(av_frame_make_writable(frame.get()), "make fallback audio frame writable");
 
-        auto* plane = reinterpret_cast<float*>(frame->data[0]);
-        for (int index = 0; index < samples; ++index) {
-            const auto sample = audioSampleIndex_ + index;
-            if (morseToneAtSample(sample)) {
-                const auto phase = 2.0 * pi * static_cast<double>(config_.ident.morseToneHz) * static_cast<double>(sample - identStartSample_)
-                    / static_cast<double>(fallbackAudioSampleRate);
-                plane[index] = static_cast<float>(0.22 * std::sin(phase));
-            } else {
-                plane[index] = 0.0F;
+        bool usedSubmittedAudio = false;
+        if (preferSubmittedAudio
+            && submittedAudioFifo_
+            && av_audio_fifo_size(submittedAudioFifo_.get()) >= samples) {
+            if (av_audio_fifo_read(submittedAudioFifo_.get(),
+                                   reinterpret_cast<void**>(frame->extended_data),
+                                   samples) < samples) {
+                throw std::runtime_error{"read submitted audio FIFO failed"};
+            }
+            submittedAudioConsumed_.notify_one();
+            usedSubmittedAudio = true;
+        } else {
+            auto* plane = reinterpret_cast<float*>(frame->data[0]);
+            for (int index = 0; index < samples; ++index) {
+                const auto sample = audioSampleIndex_ + index;
+                if (morseToneAtSample(sample)) {
+                    const auto phase = 2.0 * pi * static_cast<double>(config_.ident.morseToneHz) * static_cast<double>(sample - identStartSample_)
+                        / static_cast<double>(fallbackAudioSampleRate);
+                    plane[index] = static_cast<float>(0.22 * std::sin(phase));
+                } else {
+                    plane[index] = 0.0F;
+                }
             }
         }
         audioSampleIndex_ += samples;
 
-        checkAv(avcodec_send_frame(audioCodec_, frame.get()), "send fallback audio frame");
+        checkAv(avcodec_send_frame(audioCodec_, frame.get()), usedSubmittedAudio ? "send submitted audio frame" : "send fallback audio frame");
         drainAudioPackets();
     }
 
     void flushAudio()
     {
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+        if (gstMuxer_) {
+            gstMuxer_->finish();
+            return;
+        }
+#endif
         if (audioCodec_ == nullptr) {
             return;
         }
@@ -3656,6 +5604,36 @@ private:
         checkAv(av_interleaved_write_frame(format_, packet), "write fallback MPEG-TS audio packet");
     }
 
+    int outputWidthPixels() const
+    {
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+        if (gstMuxer_) {
+            return gstMuxer_->width();
+        }
+#endif
+        return codec_ != nullptr ? codec_->width : outputWidth(config_);
+    }
+
+    int outputHeightPixels() const
+    {
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+        if (gstMuxer_) {
+            return gstMuxer_->height();
+        }
+#endif
+        return codec_ != nullptr ? codec_->height : outputHeight(config_);
+    }
+
+    AVPixelFormat outputPixelFormat() const
+    {
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+        if (gstMuxer_) {
+            return gstMuxer_->pixelFormat();
+        }
+#endif
+        return codec_ != nullptr ? codec_->pix_fmt : AV_PIX_FMT_YUV420P;
+    }
+
     const RepeaterConfig& config_;
     PlutoSink& output_;
     PersistentRtmpMuxer* rtmp_{};
@@ -3665,9 +5643,15 @@ private:
     AVCodecContext* audioCodec_{nullptr};
     AVStream* stream_{nullptr};
     AVStream* audioStream_{nullptr};
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+    std::unique_ptr<GStreamerOutputMuxer> gstMuxer_;
+#endif
     std::unique_ptr<OverlayRenderer> identOverlay_;
     std::unique_ptr<OverlayRenderer> clockOverlay_;
+    std::unique_ptr<OverlayRenderer> streamInfoOverlay_;
     std::int64_t clockSecondIndex_{-1};
+    std::optional<std::string> streamInfo_;
+    int liveInfoFramesRemaining_{0};
     FramePtr cachedComposited_;
     const AVFrame* cachedCompositedIdentity_{};
     std::int64_t cachedCompositedSecondIndex_{-1};
@@ -3692,6 +5676,13 @@ private:
     int audioFrameSamples_{1024};
     bool firstIdent_{true};
     std::int64_t lastVideoPts_{AV_NOPTS_VALUE};
+    std::deque<FramePtr> submittedVideoFrames_;
+    std::string submittedVideoSource_{"submitted"};
+    std::chrono::steady_clock::time_point submittedVideoAt_{};
+    std::condition_variable_any submittedVideoConsumed_;
+    AudioFifoPtr submittedAudioFifo_;
+    std::condition_variable_any submittedAudioConsumed_;
+    mutable std::mutex outputMutex_;
 };
 
 } // namespace
@@ -3715,6 +5706,10 @@ void MediaPipeline::select(std::optional<ActiveInput> input)
 {
     std::lock_guard lock{mutex_};
     active_ = std::move(input);
+    if (!active_.has_value()) {
+        streamIndicator_.reset();
+        liveRetryAfter_ = {};
+    }
 }
 
 void MediaPipeline::setBeaconAllowed(bool allowed)
@@ -3760,6 +5755,10 @@ void MediaPipeline::tick(std::chrono::steady_clock::time_point now)
             }
             enterAnalogue(now);
         } else {
+            if (now < liveRetryAfter_) {
+                enterFallback(now, true);
+                return;
+            }
             enterRetransmit(now);
         }
         return;
@@ -3784,6 +5783,9 @@ void MediaPipeline::write(std::span<const std::byte> packet)
             return;
         }
         if (mode_ == MediaPipelineMode::fallbackVideo) {
+            return;
+        }
+        if (std::chrono::steady_clock::now() < liveRetryAfter_) {
             return;
         }
         lastInput_ = std::chrono::steady_clock::now();
@@ -3813,13 +5815,16 @@ void MediaPipeline::ensureLibavReady()
         throw std::runtime_error{"libav has no MPEG-2, H.264, or H.265 decoder available"};
     }
 
-    if (avcodec_find_encoder_by_name("h264_v4l2m2m") == nullptr
-        && avcodec_find_encoder_by_name("libx264") == nullptr
-        && avcodec_find_encoder(AV_CODEC_ID_H264) == nullptr) {
-        throw std::runtime_error{"libav has no H.264 encoder available"};
+    if (avcodec_find_encoder_by_name("h264_v4l2m2m") == nullptr) {
+        throw std::runtime_error{"libav has no hardware H.264 encoder h264_v4l2m2m available"};
     }
     if (avcodec_find_encoder(AV_CODEC_ID_AAC) == nullptr) {
         throw std::runtime_error{"libav has no AAC encoder available"};
+    }
+
+    if (config_.media.backend == "gstreamer") {
+        const auto gst = probeGStreamerBackend();
+        std::cout << "media pipeline requested GStreamer backend: " << gst.detail << '\n';
     }
 }
 
@@ -3832,6 +5837,7 @@ void MediaPipeline::enterRetransmit(std::chrono::steady_clock::time_point now)
     lastInput_ = now;
     mode_ = MediaPipelineMode::retransmit;
     transmitEnabled_ = true;
+    streamIndicator_.reset();
     output_.setTransmitEnabled(true);
     inputReady_.notify_all();
     std::cout << "media pipeline entering retransmit mode; queued TS will require watermark transcode\n";
@@ -3912,18 +5918,39 @@ void MediaPipeline::workerLoop()
     std::unique_ptr<PersistentRtmpMuxer> rtmpMuxer;
     std::unique_ptr<FallbackMuxer> fallbackMuxer;
     std::unique_ptr<LiveTranscoder> liveTranscoder;
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+    std::unique_ptr<GStreamerLiveTranscoder> gstLiveTranscoder;
+#endif
     std::unique_ptr<FallbackVideoTranscoder> fallbackVideoTranscoder;
     std::unique_ptr<AnalogueCaptureTranscoder> analogueTranscoder;
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+    std::unique_ptr<GStreamerAnalogueCaptureTranscoder> gstAnalogueTranscoder;
+#endif
     auto nextFrameAt = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point liveAttemptStartedAt{};
 
-    if (config_.streaming.rtmp.enabled && !config_.streaming.rtmp.url.empty()) {
+    if (config_.media.backend != "gstreamer" && config_.streaming.rtmp.enabled && !config_.streaming.rtmp.url.empty()) {
         rtmpMuxer = std::make_unique<PersistentRtmpMuxer>(config_);
     }
+
+    auto retireLiveTranscoders = [&] {
+        if (liveTranscoder) {
+            liveTranscoder->stop();
+            liveTranscoder.reset();
+        }
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+        if (gstLiveTranscoder) {
+            gstLiveTranscoder->stop();
+            gstLiveTranscoder.reset();
+        }
+#endif
+    };
 
     while (true) {
         MediaPipelineMode mode;
         std::optional<ActiveInput> active;
         std::optional<std::string> notice;
+        std::optional<std::string> streamIndicator;
         std::optional<std::string> fallbackVideoPath;
         bool beaconAllowed{};
         {
@@ -3937,15 +5964,19 @@ void MediaPipeline::workerLoop()
             mode = mode_;
             active = active_;
             notice = accessNotice_;
+            streamIndicator = streamIndicator_;
             fallbackVideoPath = fallbackVideoPath_;
             beaconAllowed = beaconAllowed_;
         }
 
         try {
             if (mode == MediaPipelineMode::fallback) {
-                liveTranscoder.reset();
+                retireLiveTranscoders();
                 fallbackVideoTranscoder.reset();
                 analogueTranscoder.reset();
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                gstAnalogueTranscoder.reset();
+#endif
                 if (!fallbackMuxer) {
                     fallbackMuxer = std::make_unique<FallbackMuxer>(config_, output_, rtmpMuxer.get());
                     fallbackFrameIndex = 0;
@@ -3958,26 +5989,32 @@ void MediaPipeline::workerLoop()
                 } else {
                     fallbackMuxer->setNotice(std::nullopt);
                 }
+                fallbackMuxer->setStreamInfo(streamIndicator);
                 std::this_thread::sleep_until(nextFrameAt);
+                fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
                 fallbackMuxer->writeFrame(fallbackFrameIndex++);
                 nextFrameAt += std::chrono::microseconds{1'000'000 / outputFrameRate(config_)};
                 continue;
             }
 
-            fallbackMuxer.reset();
             if (mode == MediaPipelineMode::fallbackVideo) {
-                liveTranscoder.reset();
+                retireLiveTranscoders();
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                gstAnalogueTranscoder.reset();
+#endif
                 analogueTranscoder.reset();
+                if (!fallbackMuxer) {
+                    fallbackMuxer = std::make_unique<FallbackMuxer>(config_, output_, rtmpMuxer.get());
+                    fallbackFrameIndex = fallbackMuxer->nextVideoPts();
+                    nextFrameAt = std::chrono::steady_clock::now();
+                }
                 if (!fallbackVideoTranscoder && fallbackVideoPath.has_value()) {
-                    fallbackVideoTranscoder = std::make_unique<FallbackVideoTranscoder>(config_,
-                                                                                        output_,
-                                                                                        rtmpMuxer.get(),
-                                                                                        *fallbackVideoPath);
+                    fallbackVideoTranscoder = std::make_unique<FallbackVideoTranscoder>(config_, *fallbackMuxer, *fallbackVideoPath);
                 }
                 bool playbackFinished{};
                 {
                     std::unique_lock lock{mutex_};
-                    inputReady_.wait_for(lock, std::chrono::milliseconds{250}, [this, &fallbackVideoTranscoder] {
+                    inputReady_.wait_for(lock, std::chrono::milliseconds{20}, [this, &fallbackVideoTranscoder] {
                         return stopping_ || mode_ != MediaPipelineMode::fallbackVideo
                             || (fallbackVideoTranscoder && fallbackVideoTranscoder->finished());
                     });
@@ -3995,25 +6032,51 @@ void MediaPipeline::workerLoop()
                 }
                 if (playbackFinished) {
                     fallbackVideoTranscoder.reset();
+                    fallbackMuxer->setStreamInfo(std::nullopt);
                     std::cout << "media pipeline fallback video finished; returning to generated fallback stream\n";
+                } else {
+                    const auto frameInterval = std::chrono::microseconds{1'000'000 / outputFrameRate(config_)};
+                    fallbackMuxer->setNotice(std::nullopt);
+                    std::this_thread::sleep_until(nextFrameAt);
+                    fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
+                    fallbackMuxer->writeFrame(fallbackFrameIndex++, true);
+                    const auto now = std::chrono::steady_clock::now();
+                    nextFrameAt = std::max(nextFrameAt + frameInterval, now + frameInterval);
                 }
             } else if (mode == MediaPipelineMode::analogue) {
-                liveTranscoder.reset();
+                retireLiveTranscoders();
                 fallbackVideoTranscoder.reset();
+                if (!fallbackMuxer) {
+                    fallbackMuxer = std::make_unique<FallbackMuxer>(config_, output_, rtmpMuxer.get());
+                    fallbackFrameIndex = fallbackMuxer->nextVideoPts();
+                    nextFrameAt = std::chrono::steady_clock::now();
+                }
                 if (!analogueTranscoder) {
-                    analogueTranscoder = std::make_unique<AnalogueCaptureTranscoder>(config_, output_, rtmpMuxer.get(), active);
+                    analogueTranscoder = std::make_unique<AnalogueCaptureTranscoder>(config_, *fallbackMuxer, active);
                 }
                 bool captureFinished{};
                 {
                     std::unique_lock lock{mutex_};
-                    inputReady_.wait_for(lock, std::chrono::milliseconds{250}, [this, &analogueTranscoder] {
+                    inputReady_.wait_for(lock, std::chrono::milliseconds{20}, [this, &analogueTranscoder
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                                                                                 , &gstAnalogueTranscoder
+#endif
+                    ] {
                         return stopping_ || mode_ != MediaPipelineMode::analogue
-                            || (analogueTranscoder && analogueTranscoder->finished());
+                            || (analogueTranscoder && analogueTranscoder->finished())
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                            || (gstAnalogueTranscoder && gstAnalogueTranscoder->finished())
+#endif
+                            ;
                     });
                     if (stopping_) {
                         break;
                     }
-                    captureFinished = analogueTranscoder && analogueTranscoder->finished();
+                    captureFinished = (analogueTranscoder && analogueTranscoder->finished())
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                        || (gstAnalogueTranscoder && gstAnalogueTranscoder->finished())
+#endif
+                        ;
                     if (captureFinished && mode_ == MediaPipelineMode::analogue) {
                         analogueRetryAfter_ = std::chrono::steady_clock::now() + std::chrono::seconds{2};
                         mode_ = MediaPipelineMode::fallback;
@@ -4024,21 +6087,105 @@ void MediaPipeline::workerLoop()
                 }
                 if (captureFinished) {
                     analogueTranscoder.reset();
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                    gstAnalogueTranscoder.reset();
+#endif
+                    fallbackMuxer->setStreamInfo(std::nullopt);
                     std::cerr << "wh-repeater: analogue capture ended; returning to generated fallback stream\n";
+                } else {
+                    const auto frameInterval = std::chrono::microseconds{1'000'000 / outputFrameRate(config_)};
+                    fallbackMuxer->setNotice(std::nullopt);
+                    std::this_thread::sleep_until(nextFrameAt);
+                    fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
+                    fallbackMuxer->writeFrame(fallbackFrameIndex++, true);
+                    const auto now = std::chrono::steady_clock::now();
+                    nextFrameAt = std::max(nextFrameAt + frameInterval, now + frameInterval);
                 }
             } else if (mode == MediaPipelineMode::retransmit) {
                 analogueTranscoder.reset();
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                gstAnalogueTranscoder.reset();
+#endif
                 fallbackVideoTranscoder.reset();
+                if (!fallbackMuxer) {
+                    fallbackMuxer = std::make_unique<FallbackMuxer>(config_, output_, rtmpMuxer.get());
+                    fallbackFrameIndex = fallbackMuxer->nextVideoPts();
+                    nextFrameAt = std::chrono::steady_clock::now();
+                }
                 if (!liveTranscoder) {
-                    liveTranscoder = std::make_unique<LiveTranscoder>(config_, output_, rtmpMuxer.get(), active);
+                    liveTranscoder = std::make_unique<LiveTranscoder>(config_, *fallbackMuxer, active);
+                    liveAttemptStartedAt = std::chrono::steady_clock::now();
                 }
                 std::vector<std::byte> queued;
+                bool liveFinished{};
+                std::string liveError;
+                bool liveReady = liveTranscoder && liveTranscoder->ready();
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                liveReady = liveReady || (gstLiveTranscoder && gstLiveTranscoder->ready());
+#endif
                 std::unique_lock lock{mutex_};
-                inputReady_.wait_for(lock, std::chrono::milliseconds{100}, [this] {
-                    return stopping_ || mode_ != MediaPipelineMode::retransmit || !inputQueue_.empty();
+                inputReady_.wait_for(lock, std::chrono::milliseconds{20}, [this, &liveTranscoder
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                                                                             , &gstLiveTranscoder
+#endif
+                ] {
+                    return stopping_ || mode_ != MediaPipelineMode::retransmit || !inputQueue_.empty()
+                        || (liveTranscoder && liveTranscoder->ready())
+                        || (liveTranscoder && liveTranscoder->finished())
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                        || (gstLiveTranscoder && gstLiveTranscoder->ready())
+                        || (gstLiveTranscoder && gstLiveTranscoder->finished())
+#endif
+                        ;
                 });
                 if (stopping_) {
                     break;
+                }
+                liveReady = (liveTranscoder && liveTranscoder->ready())
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                    || (gstLiveTranscoder && gstLiveTranscoder->ready())
+#endif
+                    ;
+                liveFinished = (liveTranscoder && liveTranscoder->finished())
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                    || (gstLiveTranscoder && gstLiveTranscoder->finished())
+#endif
+                    ;
+                if (!liveReady && !liveFinished && liveAttemptStartedAt != std::chrono::steady_clock::time_point{}
+                    && std::chrono::steady_clock::now() - liveAttemptStartedAt > liveVideoAcquisitionTimeout) {
+                    liveFinished = true;
+                    liveError = "no valid decoded video after "
+                        + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(liveVideoAcquisitionTimeout).count())
+                        + " seconds";
+                    if (liveTranscoder) {
+                        liveTranscoder->stop();
+                    }
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                    if (gstLiveTranscoder) {
+                        gstLiveTranscoder->stop();
+                    }
+#endif
+                }
+                if (liveFinished) {
+                    if (liveError.empty() && liveTranscoder) {
+                        liveError = liveTranscoder->error();
+                    }
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                    if (liveError.empty() && gstLiveTranscoder) {
+                        liveError = gstLiveTranscoder->error();
+                    }
+#endif
+                    liveRetryAfter_ = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+                    if (active.has_value()) {
+                        streamIndicator_ = receivedStreamErrorText(*active, liveError);
+                    } else {
+                        streamIndicator_.reset();
+                    }
+                    mode_ = MediaPipelineMode::fallback;
+                    transmitEnabled_ = true;
+                    output_.setTransmitEnabled(true);
+                    inputQueue_.clear();
+                    inputReady_.notify_all();
                 }
                 if (!inputQueue_.empty()) {
                     queued.insert(queued.end(), inputQueue_.begin(), inputQueue_.end());
@@ -4046,20 +6193,91 @@ void MediaPipeline::workerLoop()
                 }
                 lock.unlock();
                 if (!queued.empty()) {
-                    liveTranscoder->append(queued);
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                    if (gstLiveTranscoder) {
+                        gstLiveTranscoder->append(queued);
+                    } else
+#endif
+                    if (liveTranscoder) {
+                        liveTranscoder->append(queued);
+                    }
+                }
+                if (liveReady) {
+                    const auto frameInterval = std::chrono::microseconds{1'000'000 / outputFrameRate(config_)};
+                    const auto liveFillTimeout = std::max<std::chrono::microseconds>(
+                        frameInterval * 12,
+                        std::chrono::milliseconds{500});
+                    bool liveVideoStale = false;
+                    if (liveTranscoder) {
+                        const auto lastLiveFrameAt = liveTranscoder->lastVideoFrameAt();
+                        liveVideoStale = lastLiveFrameAt == std::chrono::steady_clock::time_point{}
+                            || std::chrono::steady_clock::now() - lastLiveFrameAt > liveFillTimeout;
+                    }
+                    if (liveVideoStale) {
+                        fallbackMuxer->setNotice(std::nullopt);
+                        if (active.has_value()) {
+                            fallbackMuxer->setStreamInfo(receivedStreamErrorText(*active, "waiting for live video frame"));
+                        }
+                    } else {
+                        fallbackMuxer->setNotice(std::nullopt);
+                        if (liveTranscoder) {
+                            fallbackMuxer->setStreamInfo(liveTranscoder->streamInfo());
+                        }
+                    }
+                    std::this_thread::sleep_until(nextFrameAt);
+                    fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
+                    fallbackMuxer->writeFrame(fallbackFrameIndex++, true);
+                    const auto now = std::chrono::steady_clock::now();
+                    nextFrameAt = std::max(nextFrameAt + frameInterval, now + frameInterval);
+                } else {
+                    if (notice.has_value()) {
+                        fallbackMuxer->setNotice(notice);
+                    } else if (!beaconAllowed) {
+                        fallbackMuxer->setNotice(sleepingMessage(config_));
+                    } else {
+                        fallbackMuxer->setNotice(std::nullopt);
+                    }
+                    if (streamIndicator.has_value()) {
+                        fallbackMuxer->setStreamInfo(streamIndicator);
+                    } else if (active.has_value()) {
+                        fallbackMuxer->setStreamInfo(receivedStreamErrorText(*active, "waiting for valid video"));
+                    } else {
+                        fallbackMuxer->setStreamInfo(std::nullopt);
+                    }
+                    std::this_thread::sleep_until(nextFrameAt);
+                    fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
+                    fallbackMuxer->writeFrame(fallbackFrameIndex++);
+                    nextFrameAt += std::chrono::microseconds{1'000'000 / outputFrameRate(config_)};
+                }
+                if (liveFinished) {
+                    retireLiveTranscoders();
+                    liveAttemptStartedAt = {};
+                    fallbackMuxer->setStreamInfo(streamIndicator_);
+                    fallbackFrameIndex = fallbackMuxer->nextVideoPts();
+                    nextFrameAt = std::chrono::steady_clock::now();
+                    std::cerr << "wh-repeater: received stream decode failed; showing fallback"
+                              << (liveError.empty() ? "" : ": ") << liveError << '\n';
+                    continue;
                 }
             } else {
-                liveTranscoder.reset();
+                fallbackMuxer.reset();
+                retireLiveTranscoders();
                 fallbackVideoTranscoder.reset();
                 analogueTranscoder.reset();
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+                gstAnalogueTranscoder.reset();
+#endif
             }
         } catch (const std::exception& ex) {
             std::cerr << "wh-repeater: media pipeline error: " << ex.what() << '\n';
             std::this_thread::sleep_for(std::chrono::seconds{1});
             fallbackMuxer.reset();
-            liveTranscoder.reset();
+            retireLiveTranscoders();
             fallbackVideoTranscoder.reset();
             analogueTranscoder.reset();
+#if defined(WH_REPEATER_HAVE_GSTREAMER)
+            gstAnalogueTranscoder.reset();
+#endif
         }
     }
     fallbackMuxer.reset();
@@ -4084,7 +6302,7 @@ void MediaPipeline::stopWorker()
 void MediaPipeline::queueInput(std::span<const std::byte> packet)
 {
     std::lock_guard lock{mutex_};
-    constexpr std::size_t maxQueuedBytes = 2 * 1024 * 1024;
+    constexpr std::size_t maxQueuedBytes = 32 * 1024 * 1024;
     if (inputQueue_.size() + packet.size() > maxQueuedBytes) {
         inputQueue_.clear();
     }

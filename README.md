@@ -24,7 +24,7 @@ This is the first working streaming test build. It can:
 - serve a local REST API on `127.0.0.1:8080`;
 - serve a web management UI through nginx over HTTPS;
 - generate a continuous MPEG-TS media pipeline with blue fallback/status slides;
-- use the Pi hardware H.264 encoder when `h264_v4l2m2m` is available;
+- require the Pi hardware H.264 encoder for all output video encoding;
 - stream the generated output to an optional RTMP server;
 - isolate FFmpeg/V4L2 media handling in a supervised child process so the
   control daemon can restart media output after a media-worker failure;
@@ -38,11 +38,24 @@ The media pipeline has a hard fixed-output contract: every source must be
 decoded, scaled, resampled, and transcoded into the configured stream profile so
 RTMP/output video is never interrupted just because the source changes. See
 [`docs/media-stream-contract.md`](docs/media-stream-contract.md).
+Hardware H.264 encode is mandatory for every output path. Software decode may be
+used when hardware decode is unavailable or unsuitable, but software H.264 encode
+must not be used as an automatic fallback.
+The hardware encoder is treated as a protected boundary: only validated
+fixed-format frames with monotonic timestamps may be submitted to it. Bad,
+missing, or stalled source data must be replaced with generated video and
+silence before it reaches the encoder.
 
 Media processing runs in a forked child process supervised by the main daemon.
 The child owns FFmpeg, V4L2 codec devices, Pluto UDP output, and RTMP output.
 The parent keeps API/config/scanning/PTT state alive, sends control and selected
 TS packets over a local Unix socket, and restarts the media child if it exits.
+
+`media.backend` selects the media implementation. `ffmpeg` is the stable default.
+`gstreamer` is an experimental complete media backend. When selected, generated
+fallback/slides, fallback videos, DVB retransmit, analogue capture, MPEG-TS
+output, and RTMP output are handled through GStreamer pipelines instead of the
+FFmpeg encode/mux path. FFmpeg remains the stable default.
 
 ## Requirements
 
@@ -161,6 +174,8 @@ The main sections are:
   gain, callsign, and watermark text;
 - `fallback`: static slide/video fallback settings and slide timing;
 - `streaming.rtmp`: optional direct RTMP output URL;
+- `media`: selected media backend, currently stable `ffmpeg` or experimental
+  complete-path `gstreamer`;
 - `hardwarePtt`: optional GPIO PTT output for amplifier/sequencer switching;
 - `beaconSchedule`: UTC operating hours for beacon/slideshow TX versus sleep mode;
 - `ident`: service name and ident interval;
