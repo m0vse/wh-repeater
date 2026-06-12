@@ -172,10 +172,11 @@ The main sections are:
 - `pluto`: DVB-S/S2 transmit settings, symbol rate, calculated mux/video rates,
   fixed output width/height/frame rate, MQTT host, MQTT protocol/device id,
   gain, callsign, and watermark text;
-- `fallback`: static slide/video fallback settings and slide timing. Fallback
-  videos should preferably be pre-encoded to match `pluto.outputWidth`,
-  `pluto.outputHeight`, and `pluto.outputFrameRate` so playback avoids avoidable
-  software scaling/frame-rate conversion load;
+- `fallback`: slideshow folders, fallback video folder, fallback playback
+  controls, hardware-decode preference, and slide timing. Fallback videos should
+  preferably be pre-encoded to match `pluto.outputWidth`, `pluto.outputHeight`,
+  and `pluto.outputFrameRate` so playback avoids avoidable software
+  scaling/frame-rate conversion load;
 - `streaming.rtmp`: optional direct RTMP output URL;
 - `media`: selected media backend, currently stable `ffmpeg` or experimental
   complete-path `gstreamer`;

@@ -35,7 +35,7 @@
   },
   "fallback": {
     "enabled": true,
-    "stillPath": "",
+    "videoDirectory": "/home/pi/Videos",
     "slideDirectory": "/var/lib/wh-repeater/slides",
     "christmasSlideDirectory": "/var/lib/wh-repeater/slides/christmas",
     "slideDurationSeconds": 10,

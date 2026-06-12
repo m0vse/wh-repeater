@@ -58,6 +58,10 @@ Required invariants:
   be forwarded as malformed frames or used to renegotiate output parameters.
 - RTMP viewers may need to reconnect after a daemon or network failure, but not
   because the daemon switched media source.
+- RTMP output is a mirror of the fixed encoded output stream. Network writes
+  must not be allowed to stall the media loop for multiple seconds; RTMP errors
+  should close that mirror and reconnect while the local encoder/Pluto output
+  continues.
 - During fallback-video file playback, stability and uninterrupted output take
   priority over lowest possible CPU use. Using one hot CPU thread for software
   decode, timestamp pacing, scaling, and audio sync is acceptable if it keeps the
@@ -67,6 +71,9 @@ Required invariants:
   and transcoded into the fixed output profile, but software scaling, frame-rate
   conversion, and hardware-decode ineligibility can increase CPU load and cause
   startup frame holds.
+- Exact-match fallback videos may bypass software scaling/copying, but only when
+  decoded dimensions, pixel format, and sample aspect already match the output
+  contract. All other fallback videos must use the normal scale/pillarbox path.
 
 Implementation implication: fallback video playback is an input source, not a
 new output profile. It must decode and resample into the existing stream profile
