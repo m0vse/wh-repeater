@@ -62,6 +62,11 @@ Required invariants:
   priority over lowest possible CPU use. Using one hot CPU thread for software
   decode, timestamp pacing, scaling, and audio sync is acceptable if it keeps the
   hardware encoder and RTMP/output stream stable.
+- Fallback videos should be prepared to match the configured output width,
+  height, and frame rate whenever practical. Mismatched files are still accepted
+  and transcoded into the fixed output profile, but software scaling, frame-rate
+  conversion, and hardware-decode ineligibility can increase CPU load and cause
+  startup frame holds.
 
 Implementation implication: fallback video playback is an input source, not a
 new output profile. It must decode and resample into the existing stream profile

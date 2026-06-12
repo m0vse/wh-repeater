@@ -21,6 +21,7 @@ const state = {
   status: null,
   dirty: false,
   sd1EnabledOverride: null,
+  saveMessageTimer: null,
 };
 
 const el = {
@@ -71,11 +72,11 @@ const el = {
   fallbackEnabled: document.querySelector("#fallback-enabled"),
   fallbackHardwareDecode: document.querySelector("#fallback-hardware-decode"),
   fallbackTimeout: document.querySelector("#fallback-timeout"),
-  fallbackStill: document.querySelector("#fallback-still"),
   fallbackSlideDirectory: document.querySelector("#fallback-slide-directory"),
   fallbackXmasSlideDirectory: document.querySelector("#fallback-xmas-slide-directory"),
   fallbackSlideDuration: document.querySelector("#fallback-slide-duration"),
-  fallbackVideos: document.querySelector("#fallback-videos"),
+  fallbackVideoDirectory: document.querySelector("#fallback-video-directory"),
+  fallbackVideoSelect: document.querySelector("#fallback-video-select"),
   fallbackPlayVideo: document.querySelector("#fallback-play-video"),
   fallbackStopVideo: document.querySelector("#fallback-stop-video"),
   rtmpEnabled: document.querySelector("#rtmp-enabled"),
@@ -123,8 +124,20 @@ function setMessage(message, ok = true) {
 }
 
 function setSaveMessage(message, ok = true) {
+  if (state.saveMessageTimer) {
+    window.clearTimeout(state.saveMessageTimer);
+    state.saveMessageTimer = null;
+  }
   el.saveState.textContent = message;
-  el.saveState.style.color = ok ? "#647080" : "#b3261e";
+  el.saveState.classList.toggle("visible", Boolean(message));
+  el.saveState.classList.toggle("error", !ok);
+  if (message && ok) {
+    state.saveMessageTimer = window.setTimeout(() => {
+      el.saveState.textContent = "";
+      el.saveState.classList.remove("visible", "error");
+      state.saveMessageTimer = null;
+    }, 5000);
+  }
 }
 
 function numberValue(input, fallback = 0) {
@@ -414,11 +427,11 @@ function fillConfigForm() {
   el.fallbackEnabled.checked = config.fallback?.enabled ?? true;
   el.fallbackHardwareDecode.checked = Boolean(config.fallback?.hardwareDecode);
   el.fallbackTimeout.value = config.fallback?.inputTimeoutMs ?? 1500;
-  el.fallbackStill.value = config.fallback?.stillPath ?? "";
   el.fallbackSlideDirectory.value = config.fallback?.slideDirectory ?? "/var/lib/wh-repeater/slides";
   el.fallbackXmasSlideDirectory.value = config.fallback?.christmasSlideDirectory ?? "/var/lib/wh-repeater/slides/christmas";
   el.fallbackSlideDuration.value = config.fallback?.slideDurationSeconds ?? 10;
-  el.fallbackVideos.value = (config.fallback?.videoPaths ?? []).join(",");
+  el.fallbackVideoDirectory.value = config.fallback?.videoDirectory ?? "/home/pi/Videos";
+  loadFallbackVideos().catch((error) => setSaveMessage(`Video list failed: ${error.message}`, false));
   el.rtmpEnabled.checked = Boolean(config.streaming?.rtmp?.enabled);
   el.rtmpUrl.value = config.streaming?.rtmp?.url ?? "";
   el.beaconScheduleEnabled.checked = Boolean(config.beaconSchedule?.enabled);
@@ -586,11 +599,11 @@ function readConfigForm() {
       hardwareDecode: el.fallbackHardwareDecode.checked,
       inputTimeoutMs: numberValue(el.fallbackTimeout, 1500),
       staticFrameRate: state.config?.fallback?.staticFrameRate ?? 2,
-      stillPath: el.fallbackStill.value,
+      videoDirectory: el.fallbackVideoDirectory.value || "/home/pi/Videos",
       slideDirectory: el.fallbackSlideDirectory.value || "/var/lib/wh-repeater/slides",
       christmasSlideDirectory: el.fallbackXmasSlideDirectory.value || "/var/lib/wh-repeater/slides/christmas",
       slideDurationSeconds: numberValue(el.fallbackSlideDuration, 10),
-      videoPaths: el.fallbackVideos.value.split(",").map((value) => value.trim()).filter(Boolean),
+      videoPaths: state.config?.fallback?.videoPaths ?? [],
     },
     streaming: {
       rtmp: {
@@ -751,9 +764,45 @@ async function fetchAppliedConfig(expected) {
   return null;
 }
 
+async function loadFallbackVideos() {
+  if (!el.fallbackVideoSelect) {
+    return;
+  }
+
+  el.fallbackVideoSelect.innerHTML = "";
+  const loading = document.createElement("option");
+  loading.value = "";
+  loading.textContent = "Loading videos";
+  el.fallbackVideoSelect.appendChild(loading);
+
+  const directory = el.fallbackVideoDirectory?.value || state.config?.fallback?.videoDirectory || "/home/pi/Videos";
+  const response = await fetch(`/api/fallback/videos?directory=${encodeURIComponent(directory)}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`videos ${response.status}`);
+  }
+  const body = await response.json();
+
+  el.fallbackVideoSelect.innerHTML = "";
+  if (!body.videos || body.videos.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = body.error ? `No videos: ${body.error}` : "No videos found";
+    el.fallbackVideoSelect.appendChild(option);
+    return;
+  }
+
+  for (const video of body.videos) {
+    const option = document.createElement("option");
+    option.value = video.path;
+    option.textContent = video.name;
+    el.fallbackVideoSelect.appendChild(option);
+  }
+}
+
 async function refreshAll() {
   try {
     await Promise.all([loadStatus(), loadConfig()]);
+    await loadFallbackVideos();
     setMessage("Connected");
   } catch (error) {
     setMessage(`API unavailable: ${error.message}`, false);
@@ -793,7 +842,10 @@ async function saveConfig() {
 }
 
 async function playFallbackVideo() {
-  const path = el.fallbackVideos.value.split(",").map((value) => value.trim()).find(Boolean) ?? "";
+  const path = el.fallbackVideoSelect?.value ?? "";
+  if (!path) {
+    throw new Error("no fallback video selected");
+  }
   const response = await fetch("/api/fallback/play", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -803,7 +855,7 @@ async function playFallbackVideo() {
     const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
     throw new Error(body.error || `HTTP ${response.status}`);
   }
-  setSaveMessage("Fallback video triggered");
+  setSaveMessage("Fallback video play request accepted");
   await loadStatus();
 }
 
@@ -849,6 +901,11 @@ if (el.fallbackPlayVideo) {
 if (el.fallbackStopVideo) {
   el.fallbackStopVideo.addEventListener("click", () => {
     stopFallbackVideo().catch((error) => setSaveMessage(`Stop fallback video failed: ${error.message}`, false));
+  });
+}
+if (el.fallbackVideoDirectory) {
+  el.fallbackVideoDirectory.addEventListener("change", () => {
+    loadFallbackVideos().catch((error) => setSaveMessage(`Video list failed: ${error.message}`, false));
   });
 }
 if (el.serviceRestart) {
@@ -904,11 +961,10 @@ for (const input of [
   el.fallbackEnabled,
   el.fallbackHardwareDecode,
   el.fallbackTimeout,
-  el.fallbackStill,
   el.fallbackSlideDirectory,
   el.fallbackXmasSlideDirectory,
   el.fallbackSlideDuration,
-  el.fallbackVideos,
+  el.fallbackVideoDirectory,
   el.rtmpEnabled,
   el.rtmpUrl,
   el.beaconScheduleEnabled,
@@ -941,7 +997,7 @@ for (const input of [
   el.identInterval,
   el.identMorseTone,
   el.identMorseWpm,
-]) {
+].filter(Boolean)) {
   input.addEventListener("input", () => {
     if (input === el.muxRate) {
       updateCalculatedMediaRates();

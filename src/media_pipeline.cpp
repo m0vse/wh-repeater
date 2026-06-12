@@ -1881,15 +1881,15 @@ FallbackHardwareDecodeDecision chooseFallbackHardwareDecoder(const RepeaterConfi
         return {nullptr, "unsupported " + pixelFormatDescription(parameters->format)};
     }
 
-    if (parameters->level > 0 && parameters->level > 31) {
-        return {nullptr, "H.264 level " + std::to_string(parameters->level) + " is above the conservative hardware-decode limit"};
+    if (parameters->level > 0 && parameters->level > 42) {
+        return {nullptr, "H.264 level " + std::to_string(parameters->level) + " is above the hardware-decode trial limit"};
     }
 
     const auto rate = stream.avg_frame_rate.num > 0 && stream.avg_frame_rate.den > 0
         ? stream.avg_frame_rate
         : stream.r_frame_rate;
-    if (rate.num > 0 && rate.den > 0 && av_q2d(rate) > 30.0) {
-        return {nullptr, "frame rate is above 30 fps"};
+    if (rate.num > 0 && rate.den > 0 && av_q2d(rate) > 60.0) {
+        return {nullptr, "frame rate is above 60 fps"};
     }
 
     return {decoder, "H.264 " + std::to_string(width) + "x" + std::to_string(height)
@@ -1897,15 +1897,53 @@ FallbackHardwareDecodeDecision chooseFallbackHardwareDecoder(const RepeaterConfi
             + ", " + pixelFormatDescription(parameters->format)};
 }
 
-int streamFrameRate(const AVStream& stream)
+int roundedFrameRate(AVRational rate)
 {
-    AVRational rate = stream.avg_frame_rate.num > 0 && stream.avg_frame_rate.den > 0
+    if (rate.num <= 0 || rate.den <= 0) {
+        return 0;
+    }
+    return std::clamp(static_cast<int>(std::llround(av_q2d(rate))), 1, 50);
+}
+
+double sourceFrameRate(const AVStream& stream)
+{
+    const auto rate = stream.avg_frame_rate.num > 0 && stream.avg_frame_rate.den > 0
         ? stream.avg_frame_rate
         : stream.r_frame_rate;
     if (rate.num <= 0 || rate.den <= 0) {
-        return 25;
+        return 25.0;
     }
-    return std::clamp(static_cast<int>(std::llround(av_q2d(rate))), 1, 50);
+    return std::clamp(av_q2d(rate), 1.0, 120.0);
+}
+
+bool interlacedFieldOrder(AVFieldOrder order)
+{
+    return order == AV_FIELD_TT
+        || order == AV_FIELD_BB
+        || order == AV_FIELD_TB
+        || order == AV_FIELD_BT;
+}
+
+int streamFrameRate(const AVStream& stream, const AVCodecContext& decoder)
+{
+    int frameRate = roundedFrameRate(decoder.framerate);
+    if (frameRate <= 0) {
+        const AVRational rate = stream.avg_frame_rate.num > 0 && stream.avg_frame_rate.den > 0
+            ? stream.avg_frame_rate
+            : stream.r_frame_rate;
+        frameRate = roundedFrameRate(rate);
+    }
+    if (frameRate <= 0) {
+        frameRate = 25;
+    }
+
+    const auto fieldOrder = decoder.field_order != AV_FIELD_UNKNOWN
+        ? decoder.field_order
+        : stream.codecpar->field_order;
+    if (interlacedFieldOrder(fieldOrder) && frameRate <= 30) {
+        frameRate *= 2;
+    }
+    return std::clamp(frameRate, 1, 50);
 }
 
 AVRational validSampleAspect(AVRational frameAspect, AVRational streamAspect)
@@ -2159,7 +2197,10 @@ private:
 
         if ((rtmpFormat_->oformat->flags & AVFMT_NOFILE) == 0) {
             AVDictionary* ioOptions = nullptr;
-            av_dict_set(&ioOptions, "rw_timeout", "5000000", 0);
+            av_dict_set(&ioOptions, "rw_timeout", "750000", 0);
+            av_dict_set(&ioOptions, "rtmp_live", "live", 0);
+            av_dict_set(&ioOptions, "rtmp_buffer", "100", 0);
+            av_dict_set(&ioOptions, "tcp_nodelay", "1", 0);
             const auto openStatus = avio_open2(&rtmpFormat_->pb, config_.streaming.rtmp.url.c_str(), AVIO_FLAG_WRITE, nullptr, &ioOptions);
             av_dict_free(&ioOptions);
             if (openStatus < 0) {
@@ -2171,6 +2212,9 @@ private:
 
         AVDictionary* options = nullptr;
         av_dict_set(&options, "flvflags", "no_duration_filesize", 0);
+        av_dict_set(&options, "muxdelay", "0", 0);
+        av_dict_set(&options, "muxpreload", "0", 0);
+        rtmpFormat_->max_delay = 0;
         const auto headerStatus = avformat_write_header(rtmpFormat_, &options);
         av_dict_free(&options);
         if (headerStatus < 0) {
@@ -2211,6 +2255,9 @@ private:
         }
         av_packet_rescale_ts(copy.get(), sourceTimeBase, stream->time_base);
         const auto timestamp = copy->dts != AV_NOPTS_VALUE ? copy->dts : copy->pts;
+        if (timestamp != AV_NOPTS_VALUE && lastDts == AV_NOPTS_VALUE && timestamp + timestampOffset < 0) {
+            timestampOffset = -timestamp;
+        }
         if (timestamp != AV_NOPTS_VALUE && lastDts != AV_NOPTS_VALUE && timestamp + timestampOffset <= lastDts) {
             const auto duration = copy->duration > 0 ? copy->duration : 1;
             timestampOffset = lastDts + duration - timestamp;
@@ -2241,12 +2288,25 @@ private:
             std::cout << '\n';
             logged = true;
         }
+        const auto writeStarted = std::chrono::steady_clock::now();
         const auto status = av_interleaved_write_frame(rtmpFormat_, copy.get());
+        const auto writeDuration = std::chrono::steady_clock::now() - writeStarted;
         if (status < 0) {
             std::cerr << "wh-repeater: RTMP " << (video ? "video" : "audio")
                       << " write failed: " << avError(status) << '\n';
             closeLocked(false);
             scheduleReconnect();
+        } else {
+            if (writeDuration > std::chrono::milliseconds{20}) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= nextSlowWriteLog_) {
+                    std::cerr << "wh-repeater: RTMP " << (video ? "video" : "audio")
+                              << " write took "
+                              << std::chrono::duration_cast<std::chrono::milliseconds>(writeDuration).count()
+                              << " ms\n";
+                    nextSlowWriteLog_ = now + std::chrono::seconds{5};
+                }
+            }
         }
     }
 
@@ -2327,6 +2387,7 @@ private:
     std::int64_t audioTimestampOffset_{0};
     std::int64_t lastVideoDts_{AV_NOPTS_VALUE};
     std::int64_t lastAudioDts_{AV_NOPTS_VALUE};
+    std::chrono::steady_clock::time_point nextSlowWriteLog_{};
     bool videoConfigured_{false};
     bool audioConfigured_{false};
     bool headerWritten_{false};
@@ -2494,11 +2555,7 @@ private:
 
     AVFrame* fixedVideoFrame(AVFrame* frame, std::string_view source, FramePtr& generatedFrame)
     {
-        std::int64_t pts = frame != nullptr ? frame->pts : AV_NOPTS_VALUE;
-        if (pts == AV_NOPTS_VALUE || (lastVideoPts_ != AV_NOPTS_VALUE && pts <= lastVideoPts_)) {
-            pts = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
-            std::cerr << "wh-repeater: " << source << " frame timestamp repaired to " << pts << '\n';
-        }
+        const auto pts = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
 
         const bool valid = frame != nullptr
             && frame->format == codec_->pix_fmt
@@ -2543,11 +2600,7 @@ private:
     AVFrame* fixedAudioFrame(AVFrame* frame, std::string_view source, FramePtr& generatedFrame)
     {
         const auto expectedSamples = audioCodec_->frame_size > 0 ? audioCodec_->frame_size : 1024;
-        auto pts = frame != nullptr ? frame->pts : AV_NOPTS_VALUE;
-        if (pts == AV_NOPTS_VALUE || (lastAudioPts_ != AV_NOPTS_VALUE && pts <= lastAudioPts_)) {
-            pts = lastAudioPts_ == AV_NOPTS_VALUE ? 0 : lastAudioPts_ + expectedSamples;
-            std::cerr << "wh-repeater: " << source << " audio timestamp repaired to " << pts << '\n';
-        }
+        const auto pts = lastAudioPts_ == AV_NOPTS_VALUE ? 0 : lastAudioPts_ + expectedSamples;
 
         const bool valid = frame != nullptr
             && frame->format == audioCodec_->sample_fmt
@@ -2879,6 +2932,7 @@ private:
         std::int64_t frameIndex = 0;
         auto videoDecodeStartedAt = std::chrono::steady_clock::time_point{};
         auto lastDecodedFrameAt = std::chrono::steady_clock::time_point{};
+        auto nextStreamInfoRefreshAt = std::chrono::steady_clock::now();
         while (true) {
             const auto readStatus = av_read_frame(inputFormat.get(), packet.get());
             if (readStatus == AVERROR_EOF) {
@@ -2895,6 +2949,11 @@ private:
                                             decoderContext,
                                             convertedFrame.get(),
                                             videoStreamIndex);
+            }
+            if (decoderContext && videoStreamIndex >= 0
+                && std::chrono::steady_clock::now() >= nextStreamInfoRefreshAt) {
+                refreshStreamInfo(*inputFormat, *inputFormat->streams[videoStreamIndex]);
+                nextStreamInfoRefreshAt = std::chrono::steady_clock::now() + std::chrono::milliseconds{500};
             }
             if (decoderContext && !audioDecoderContext && packet->stream_index >= 0) {
                 maybeInitialiseAudioDecoder(inputFormat.get(), packet->stream_index, audioDecoderContext, audioStreamIndex);
@@ -2992,25 +3051,18 @@ private:
 
         const auto decodedWidth = evenDimension(stream->codecpar->width > 0 ? stream->codecpar->width : outputWidth(config_));
         const auto decodedHeight = evenDimension(stream->codecpar->height > 0 ? stream->codecpar->height : outputHeight(config_));
-        const auto frameRate = streamFrameRate(*stream);
+        const auto frameRate = streamFrameRate(*stream, *context);
         std::cout << "media pipeline detected received " << codecDescription(codecId)
                   << " video, decoding with " << (decoder->name == nullptr ? "default" : decoder->name)
                   << " at " << decodedWidth << "x" << decodedHeight << " " << frameRate << " fps\n";
 
-        auto streamInfo = active_.has_value()
-            ? std::optional<std::string>{streamInfoText(*active_,
-                                                        codecDescription(codecId),
-                                                        decodedWidth,
-                                                        decodedHeight,
-                                                        frameRate,
-                                                        *inputFormat,
-                                                        *stream)}
-            : std::nullopt;
-        {
-            std::lock_guard lock{streamInfoMutex_};
-            streamInfo_ = streamInfo;
-        }
-        output_.setStreamInfo(streamInfo);
+        liveVideoDetails_ = LiveVideoDetails{
+            .codec = codecDescription(codecId),
+            .width = decodedWidth,
+            .height = decodedHeight,
+            .frameRate = frameRate,
+        };
+        refreshStreamInfo(*inputFormat, *stream);
         convertedFrame->format = output_.pixelFormat();
         convertedFrame->width = output_.width();
         convertedFrame->height = output_.height();
@@ -3019,6 +3071,32 @@ private:
         videoStreamIndex = streamIndex;
         decoderContext = std::move(context);
         return true;
+    }
+
+    void refreshStreamInfo(const AVFormatContext& inputFormat, const AVStream& stream)
+    {
+        std::optional<std::string> streamInfo;
+        if (active_.has_value() && liveVideoDetails_.has_value()) {
+            streamInfo = streamInfoText(*active_,
+                                        liveVideoDetails_->codec,
+                                        liveVideoDetails_->width,
+                                        liveVideoDetails_->height,
+                                        liveVideoDetails_->frameRate,
+                                        inputFormat,
+                                        stream);
+        }
+
+        bool changed = false;
+        {
+            std::lock_guard lock{streamInfoMutex_};
+            changed = streamInfo_ != streamInfo;
+            if (changed) {
+                streamInfo_ = streamInfo;
+            }
+        }
+        if (changed) {
+            output_.setStreamInfo(streamInfo);
+        }
     }
 
     bool maybeInitialiseAudioDecoder(AVFormatContext* inputFormat,
@@ -3372,6 +3450,13 @@ private:
     std::string error_;
     mutable std::mutex streamInfoMutex_;
     std::optional<std::string> streamInfo_;
+    struct LiveVideoDetails {
+        std::string codec;
+        int width{};
+        int height{};
+        int frameRate{};
+    };
+    std::optional<LiveVideoDetails> liveVideoDetails_;
     std::vector<int> loggedLiveStreams_;
     std::thread thread_;
 };
@@ -3548,9 +3633,11 @@ private:
                 startedAt + std::chrono::microseconds{inputFormat->duration} + std::chrono::seconds{1}}
             : std::nullopt;
         std::int64_t frameIndex = 0;
+        std::int64_t decodedVideoFrames = 0;
         std::int64_t audioPts = 0;
         std::optional<double> firstVideoSeconds;
         std::int64_t lastVideoPts = -1;
+        const auto fallbackSourceFrameRate = sourceFrameRate(*videoStream);
         const auto streamSampleAspect = validSampleAspect(videoStream->sample_aspect_ratio,
                                                           videoStream->codecpar->sample_aspect_ratio);
         while (!stopping_.load()) {
@@ -3575,8 +3662,10 @@ private:
                              output_,
                              *videoStream,
                              streamSampleAspect,
+                             fallbackSourceFrameRate,
                              firstVideoSeconds,
                              lastVideoPts,
+                             decodedVideoFrames,
                              frameIndex);
             } else if (audioDecoderContext && packet->stream_index == audioStreamIndex) {
                 decodeAudioPacket(audioDecoderContext.get(),
@@ -3599,8 +3688,10 @@ private:
                      output_,
                      *videoStream,
                      streamSampleAspect,
+                     fallbackSourceFrameRate,
                      firstVideoSeconds,
                      lastVideoPts,
+                     decodedVideoFrames,
                      frameIndex);
         if (audioDecoderContext) {
             checkAv(avcodec_send_packet(audioDecoderContext.get(), nullptr), "flush fallback audio decoder");
@@ -3623,8 +3714,10 @@ private:
                       EncodedOutputSink& outputMuxer,
                       const AVStream& videoStream,
                       AVRational streamSampleAspect,
+                      double fallbackSourceFrameRate,
                       std::optional<double>& firstVideoSeconds,
                       std::int64_t& lastVideoPts,
+                      std::int64_t& decodedVideoFrames,
                       std::int64_t& frameIndex)
     {
         const auto sendStatus = avcodec_send_packet(decoder, packet);
@@ -3636,8 +3729,10 @@ private:
                          outputMuxer,
                          videoStream,
                          streamSampleAspect,
+                         fallbackSourceFrameRate,
                          firstVideoSeconds,
                          lastVideoPts,
+                         decodedVideoFrames,
                          frameIndex);
             checkAv(avcodec_send_packet(decoder, packet), "send fallback video packet after drain");
         } else {
@@ -3650,8 +3745,10 @@ private:
                      outputMuxer,
                      videoStream,
                      streamSampleAspect,
+                     fallbackSourceFrameRate,
                      firstVideoSeconds,
                      lastVideoPts,
+                     decodedVideoFrames,
                      frameIndex);
     }
 
@@ -3662,8 +3759,10 @@ private:
                       EncodedOutputSink& outputMuxer,
                       const AVStream& videoStream,
                       AVRational streamSampleAspect,
+                      double fallbackSourceFrameRate,
                       std::optional<double>& firstVideoSeconds,
                       std::int64_t& lastVideoPts,
+                      std::int64_t& decodedVideoFrames,
                       std::int64_t& frameIndex)
     {
         for (;;) {
@@ -3672,8 +3771,16 @@ private:
                 break;
             }
             checkAv(receiveStatus, "receive fallback video frame");
-            auto pts = sourceVideoPts(*frame, videoStream, outputMuxer, firstVideoSeconds, lastVideoPts, frameIndex);
+            auto pts = sourceVideoPts(*frame,
+                                      videoStream,
+                                      outputMuxer,
+                                      fallbackSourceFrameRate,
+                                      decodedVideoFrames,
+                                      firstVideoSeconds,
+                                      lastVideoPts,
+                                      frameIndex);
             outputMuxer.submitVideoFrame(convertFrame(frame, convertedFrame, scaler, outputMuxer, streamSampleAspect, pts), "fallback-video");
+            ++decodedVideoFrames;
             frameIndex = std::max(frameIndex + 1, pts + 1);
             av_frame_unref(frame);
             if (stopping_.load()) {
@@ -3685,21 +3792,27 @@ private:
     std::int64_t sourceVideoPts(AVFrame& frame,
                                 const AVStream& videoStream,
                                 const EncodedOutputSink& outputMuxer,
+                                double fallbackSourceFrameRate,
+                                std::int64_t decodedVideoFrames,
                                 std::optional<double>& firstVideoSeconds,
                                 std::int64_t& lastVideoPts,
                                 std::int64_t fallbackFrameIndex)
     {
+        std::int64_t pts = fallbackFrameIndex;
         const auto sourceTimestamp = frame.best_effort_timestamp != AV_NOPTS_VALUE
             ? frame.best_effort_timestamp
             : frame.pts;
-        std::int64_t pts = fallbackFrameIndex;
-        if (sourceTimestamp != AV_NOPTS_VALUE) {
+        if (sourceTimestamp != AV_NOPTS_VALUE && videoStream.time_base.num > 0 && videoStream.time_base.den > 0) {
             const auto seconds = static_cast<double>(sourceTimestamp) * av_q2d(videoStream.time_base);
             if (!firstVideoSeconds.has_value()) {
                 firstVideoSeconds = seconds;
             }
             pts = static_cast<std::int64_t>(std::llround((seconds - *firstVideoSeconds)
                                                         * static_cast<double>(outputMuxer.frameRate())));
+        } else if (fallbackSourceFrameRate > 0.0) {
+            pts = static_cast<std::int64_t>(std::llround(static_cast<double>(decodedVideoFrames)
+                                                        * static_cast<double>(outputMuxer.frameRate())
+                                                        / fallbackSourceFrameRate));
         }
         if (pts <= lastVideoPts) {
             pts = lastVideoPts + 1;
@@ -3715,10 +3828,19 @@ private:
                           AVRational streamSampleAspect,
                           std::int64_t pts)
     {
+        const auto sampleAspect = validSampleAspect(frame->sample_aspect_ratio, streamSampleAspect);
+        const auto sourceFormat = normalisedPixelFormat(static_cast<AVPixelFormat>(frame->format));
+        if (frame->width == outputMuxer.width()
+            && frame->height == outputMuxer.height()
+            && sourceFormat == outputMuxer.pixelFormat()
+            && sampleAspect.num == sampleAspect.den) {
+            frame->pts = pts;
+            return frame;
+        }
+
         checkAv(av_frame_make_writable(convertedFrame), "make fallback video converted frame writable");
         fillBlack(*convertedFrame);
 
-        const auto sampleAspect = validSampleAspect(frame->sample_aspect_ratio, streamSampleAspect);
         const auto displayWidth = static_cast<double>(frame->width)
             * static_cast<double>(sampleAspect.num) / static_cast<double>(sampleAspect.den);
         const auto scale = std::min(static_cast<double>(outputMuxer.width()) / displayWidth,
@@ -3733,7 +3855,7 @@ private:
         if (!scaler) {
             scaler.reset(sws_getContext(frame->width,
                                         frame->height,
-                                        normalisedPixelFormat(static_cast<AVPixelFormat>(frame->format)),
+                                        sourceFormat,
                                         dstWidth,
                                         dstHeight,
                                         outputMuxer.pixelFormat(),
@@ -4299,11 +4421,11 @@ public:
         copyPlane(dst, chromaWidth, frame->data[2], frame->linesize[2], chromaWidth, chromaHeight);
         gst_buffer_unmap(buffer, &map);
 
-        const auto pts = frame->pts == AV_NOPTS_VALUE ? videoFrameIndex_ : frame->pts;
+        const auto pts = videoFrameIndex_;
         GST_BUFFER_PTS(buffer) = gst_util_uint64_scale(static_cast<guint64>(pts), GST_SECOND, static_cast<guint64>(frameRate_));
         GST_BUFFER_DTS(buffer) = GST_BUFFER_PTS(buffer);
         GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(1, GST_SECOND, static_cast<guint64>(frameRate_));
-        videoFrameIndex_ = std::max(videoFrameIndex_ + 1, pts + 1);
+        ++videoFrameIndex_;
 
         const auto flow = gst_app_src_push_buffer(GST_APP_SRC(rawVideoSrc_), buffer);
         if (flow != GST_FLOW_OK) {
@@ -4314,6 +4436,7 @@ public:
 
     void writeAudioSamples(const float* samples, int count, std::int64_t pts)
     {
+        (void)pts;
         if (finished_ || samples == nullptr || count <= 0) {
             return;
         }
@@ -4330,7 +4453,9 @@ public:
         std::memcpy(map.data, samples, byteSize);
         gst_buffer_unmap(buffer, &map);
 
-        GST_BUFFER_PTS(buffer) = gst_util_uint64_scale(static_cast<guint64>(pts), GST_SECOND, fallbackAudioSampleRate);
+        const auto outputPts = audioSampleIndex_;
+        audioSampleIndex_ += count;
+        GST_BUFFER_PTS(buffer) = gst_util_uint64_scale(static_cast<guint64>(outputPts), GST_SECOND, fallbackAudioSampleRate);
         GST_BUFFER_DTS(buffer) = GST_BUFFER_PTS(buffer);
         GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(static_cast<guint64>(count), GST_SECOND, fallbackAudioSampleRate);
 
@@ -4454,6 +4579,7 @@ private:
     GstElement* rawAudioSrc_{};
     GstElement* rawTsSink_{};
     std::int64_t videoFrameIndex_{0};
+    std::int64_t audioSampleIndex_{0};
     bool eosSeen_{false};
     bool finished_{false};
 };
@@ -4945,18 +5071,24 @@ public:
     void writeFrame(std::int64_t frameIndex)
     {
         std::lock_guard lock{outputMutex_};
+        const auto started = std::chrono::steady_clock::now();
         writeFrameLocked(frameIndex, false);
+        recordWriteFrameDurationLocked(std::chrono::steady_clock::now() - started);
+        maybeLogTimingStatsLocked("fallback");
     }
 
     void writeFrame(std::int64_t frameIndex, bool preferSubmittedVideo)
     {
         std::lock_guard lock{outputMutex_};
+        const auto started = std::chrono::steady_clock::now();
         writeFrameLocked(frameIndex, preferSubmittedVideo);
+        recordWriteFrameDurationLocked(std::chrono::steady_clock::now() - started);
+        maybeLogTimingStatsLocked(preferSubmittedVideo ? "submitted" : "fallback");
     }
 
     void submitVideoFrame(AVFrame* frame, std::string_view source) override
     {
-        std::lock_guard lock{outputMutex_};
+        std::unique_lock lock{outputMutex_};
         if (frame == nullptr
             || frame->format != outputPixelFormat()
             || frame->width != outputWidthPixels()
@@ -4972,19 +5104,26 @@ public:
         }
         normaliseVideoFrameProperties(*clone);
         const auto sourceText = std::string{source};
+        if (submittedVideoSource_ != sourceText) {
+            clearSubmittedVideoLocked();
+            clearSubmittedAudioLocked();
+            submittedVideoSource_ = sourceText;
+            submittedVideoBaseFrame_ = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
+        } else if (sourceText == "fallback-video" && submittedVideoBaseFrame_ == AV_NOPTS_VALUE) {
+            submittedVideoBaseFrame_ = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
+        }
         if (sourceText == "fallback-video") {
             constexpr std::size_t maxQueuedVideoFrames{8};
             while (submittedVideoFrames_.size() >= maxQueuedVideoFrames) {
-                submittedVideoConsumed_.wait_for(outputMutex_, std::chrono::milliseconds{100});
+                submittedVideoConsumed_.wait_for(lock, std::chrono::milliseconds{100});
                 if (submittedVideoFrames_.size() >= maxQueuedVideoFrames) {
-                    submittedVideoFrames_.pop_front();
+                    return;
                 }
             }
         } else {
             submittedVideoFrames_.clear();
         }
         submittedVideoFrames_.push_back(std::move(clone));
-        submittedVideoSource_ = sourceText;
         submittedVideoAt_ = std::chrono::steady_clock::now();
     }
 
@@ -5015,30 +5154,47 @@ public:
                 throw std::runtime_error{"allocate submitted audio FIFO failed"};
             }
         }
-        const auto maxSubmittedAudioSamples = audioCodec_->sample_rate * 2;
+        const auto sourceText = std::string{source};
+        if (submittedAudioSource_ != sourceText) {
+            clearSubmittedAudioLocked();
+            submittedAudioSource_ = sourceText;
+            submittedAudioStartSample_ = audioSampleIndex_;
+        }
+        int writeSamples = frame->nb_samples;
+        const auto maxSubmittedAudioSamples = sourceText == "fallback-video"
+            ? std::max(audioCodec_->frame_size * 6, audioCodec_->sample_rate / 8)
+            : audioCodec_->sample_rate * 2;
+        if (sourceText == "fallback-video"
+            && av_audio_fifo_size(submittedAudioFifo_.get()) + writeSamples > maxSubmittedAudioSamples) {
+            const auto dropSamples = av_audio_fifo_size(submittedAudioFifo_.get()) + writeSamples - maxSubmittedAudioSamples;
+            av_audio_fifo_drain(submittedAudioFifo_.get(), std::max(0, dropSamples));
+        }
         const auto backpressureDeadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
-        while (av_audio_fifo_size(submittedAudioFifo_.get()) + frame->nb_samples > maxSubmittedAudioSamples) {
+        while (sourceText != "fallback-video"
+               && av_audio_fifo_size(submittedAudioFifo_.get()) + writeSamples > maxSubmittedAudioSamples) {
             submittedAudioConsumed_.wait_for(lock, std::chrono::milliseconds{100});
-            if (av_audio_fifo_size(submittedAudioFifo_.get()) + frame->nb_samples > maxSubmittedAudioSamples) {
-                std::cerr << "wh-repeater: live audio queue still full; applying decode backpressure\n";
+            if (av_audio_fifo_size(submittedAudioFifo_.get()) + writeSamples > maxSubmittedAudioSamples) {
+                std::cerr << "wh-repeater: submitted audio queue still full; applying decode backpressure\n";
             }
             if (std::chrono::steady_clock::now() >= backpressureDeadline
-                && av_audio_fifo_size(submittedAudioFifo_.get()) + frame->nb_samples > maxSubmittedAudioSamples) {
-                const auto dropSamples = std::min(frame->nb_samples, av_audio_fifo_size(submittedAudioFifo_.get()));
-                std::cerr << "wh-repeater: live audio queue full for too long; dropping "
+                && av_audio_fifo_size(submittedAudioFifo_.get()) + writeSamples > maxSubmittedAudioSamples) {
+                const auto dropSamples = std::min(writeSamples, av_audio_fifo_size(submittedAudioFifo_.get()));
+                std::cerr << "wh-repeater: submitted audio queue full for too long; dropping "
                           << dropSamples << " samples to avoid worker stall\n";
                 av_audio_fifo_drain(submittedAudioFifo_.get(), dropSamples);
                 break;
             }
         }
         checkAv(av_audio_fifo_realloc(submittedAudioFifo_.get(),
-                                      av_audio_fifo_size(submittedAudioFifo_.get()) + frame->nb_samples),
+                                      av_audio_fifo_size(submittedAudioFifo_.get()) + writeSamples),
                 "grow submitted audio FIFO");
         if (av_audio_fifo_write(submittedAudioFifo_.get(),
                                 reinterpret_cast<void**>(frame->extended_data),
-                                frame->nb_samples) < frame->nb_samples) {
+                                writeSamples) < writeSamples) {
             throw std::runtime_error{"write submitted audio FIFO failed"};
         }
+        ++statsSubmittedAudioInputFrames_;
+        statsSubmittedAudioInputSamples_ += static_cast<std::uint64_t>(writeSamples);
     }
 
 private:
@@ -5046,13 +5202,21 @@ private:
     {
         FramePtr frame;
         const AVFrame* contentIdentity{};
-        const auto submittedVideoHold = submittedVideoSource_ == "fallback-video"
-            ? std::chrono::milliseconds{750}
-            : std::chrono::seconds{5};
-        const auto submittedVideoFresh = !submittedVideoFrames_.empty()
-            && std::chrono::steady_clock::now() - submittedVideoAt_ < submittedVideoHold;
+        const auto submittedVideoFresh = submittedVideoSource_ == "fallback-video"
+            ? !submittedVideoFrames_.empty()
+            : (!submittedVideoFrames_.empty()
+               && std::chrono::steady_clock::now() - submittedVideoAt_ < std::chrono::seconds{5});
         if (preferSubmittedVideo && submittedVideoFresh) {
             if (submittedVideoSource_ == "fallback-video") {
+                while (submittedVideoFrames_.size() > 1
+                       && submittedFrameDuePts(*submittedVideoFrames_[1]) <= frameIndex) {
+                    submittedVideoFrames_.pop_front();
+                    submittedVideoConsumed_.notify_one();
+                }
+                if (submittedFrameDuePts(*submittedVideoFrames_.front()) > frameIndex) {
+                    writeHeldOrGeneratedSubmittedFrame(frameIndex);
+                    return;
+                }
                 frame = std::move(submittedVideoFrames_.front());
                 submittedVideoFrames_.pop_front();
                 submittedVideoConsumed_.notify_one();
@@ -5062,24 +5226,23 @@ private:
             if (!frame) {
                 throw std::runtime_error{"submitted video frame missing"};
             }
-            frame->pts = frameIndex;
-            auto overlayFrame = identOverlay_->render(frame.get());
-            overlayFrame->pts = frameIndex;
-            if (streamInfoOverlay_ == nullptr && liveInfoFramesRemaining_ > 0
-                && streamInfo_.has_value() && !streamInfo_->empty()) {
-                streamInfoOverlay_ = std::make_unique<OverlayRenderer>(streamInfoFilter(*streamInfo_, frameRate_),
-                                                                        outputWidthPixels(),
-                                                                        outputHeightPixels(),
-                                                                        outputPixelFormat(),
-                                                                        frameRate_);
+            if (submittedVideoSource_ == "fallback-video") {
+                heldSubmittedVideoFrame_.reset(av_frame_clone(frame.get()));
+                if (!heldSubmittedVideoFrame_) {
+                    throw std::runtime_error{"clone held fallback video frame failed"};
+                }
+                normaliseVideoFrameProperties(*heldSubmittedVideoFrame_);
+                heldRenderedSubmittedVideoFrame_.reset();
             }
-            if (streamInfoOverlay_ != nullptr && liveInfoFramesRemaining_ > 0) {
-                overlayFrame = streamInfoOverlay_->render(overlayFrame.get());
-                overlayFrame->pts = frameIndex;
-                --liveInfoFramesRemaining_;
-            }
-            encode(overlayFrame.get(), submittedVideoSource_);
-            writeAudioUntil(frameIndex + 1, true);
+            ++statsSubmittedVideoFrames_;
+            writeSubmittedVideoFrame(std::move(frame), frameIndex);
+            return;
+        }
+        if (preferSubmittedVideo
+            && submittedVideoSource_ == "fallback-video"
+            && (heldSubmittedVideoFrame_ || heldRenderedSubmittedVideoFrame_)) {
+            ++statsHeldVideoFrames_;
+            writeHeldOrGeneratedSubmittedFrame(frameIndex);
             return;
         }
 
@@ -5112,8 +5275,159 @@ private:
         }
         frame->pts = frameIndex;
         auto compositedFrame = compositedFallbackFrame(frame.get(), contentIdentity, frameIndex);
+        ++statsGeneratedVideoFrames_;
         encode(compositedFrame.get());
         writeAudioUntil(frameIndex + 1, false);
+    }
+
+    void clearSubmittedAudioLocked()
+    {
+        if (submittedAudioFifo_) {
+            av_audio_fifo_reset(submittedAudioFifo_.get());
+            submittedAudioConsumed_.notify_all();
+        }
+    }
+
+    void clearSubmittedVideoLocked()
+    {
+        submittedVideoFrames_.clear();
+        heldSubmittedVideoFrame_.reset();
+        heldRenderedSubmittedVideoFrame_.reset();
+        submittedVideoBaseFrame_ = AV_NOPTS_VALUE;
+        submittedVideoConsumed_.notify_all();
+    }
+
+    std::int64_t submittedFrameDuePts(const AVFrame& frame) const
+    {
+        const auto base = submittedVideoBaseFrame_ == AV_NOPTS_VALUE
+            ? (lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1)
+            : submittedVideoBaseFrame_;
+        const auto relativePts = frame.pts == AV_NOPTS_VALUE ? 0 : frame.pts;
+        return base + relativePts;
+    }
+
+    static long durationMs(std::chrono::steady_clock::duration duration)
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    }
+
+    void recordWriteFrameDurationLocked(std::chrono::steady_clock::duration duration)
+    {
+        ++statsOutputFrames_;
+        maxWriteFrameDuration_ = std::max(maxWriteFrameDuration_, duration);
+    }
+
+    void recordVideoEncodeDurationLocked(std::chrono::steady_clock::duration duration)
+    {
+        maxVideoEncodeDuration_ = std::max(maxVideoEncodeDuration_, duration);
+    }
+
+    void recordAudioEncodeDurationLocked(std::chrono::steady_clock::duration duration)
+    {
+        ++statsAudioFrames_;
+        maxAudioEncodeDuration_ = std::max(maxAudioEncodeDuration_, duration);
+    }
+
+    void maybeLogTimingStatsLocked(std::string_view mode)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (nextStatsLogAt_ == std::chrono::steady_clock::time_point{}) {
+            nextStatsLogAt_ = now + std::chrono::seconds{5};
+            statsStartedAt_ = now;
+            return;
+        }
+        if (now < nextStatsLogAt_) {
+            return;
+        }
+
+        const auto elapsedMs = std::max<long>(1, durationMs(now - statsStartedAt_));
+        const auto submittedAudioSamples = submittedAudioFifo_ ? av_audio_fifo_size(submittedAudioFifo_.get()) : 0;
+        std::cout << "media pipeline output stats mode=" << mode
+                  << " elapsed_ms=" << elapsedMs
+                  << " frames=" << statsOutputFrames_
+                  << " generated=" << statsGeneratedVideoFrames_
+                  << " submitted=" << statsSubmittedVideoFrames_
+                  << " held=" << statsHeldVideoFrames_
+                  << " audio_frames=" << statsAudioFrames_
+                  << " submitted_audio_in_frames=" << statsSubmittedAudioInputFrames_
+                  << " submitted_audio_in_samples=" << statsSubmittedAudioInputSamples_
+                  << " submitted_audio_out_frames=" << statsSubmittedAudioOutputFrames_
+                  << " submitted_video_q=" << submittedVideoFrames_.size()
+                  << " submitted_audio_samples=" << submittedAudioSamples
+                  << " max_write_ms=" << durationMs(maxWriteFrameDuration_)
+                  << " max_video_ms=" << durationMs(maxVideoEncodeDuration_)
+                  << " max_audio_ms=" << durationMs(maxAudioEncodeDuration_)
+                  << '\n';
+
+        statsStartedAt_ = now;
+        nextStatsLogAt_ = now + std::chrono::seconds{5};
+        statsOutputFrames_ = 0;
+        statsGeneratedVideoFrames_ = 0;
+        statsSubmittedVideoFrames_ = 0;
+        statsHeldVideoFrames_ = 0;
+        statsAudioFrames_ = 0;
+        statsSubmittedAudioInputFrames_ = 0;
+        statsSubmittedAudioInputSamples_ = 0;
+        statsSubmittedAudioOutputFrames_ = 0;
+        maxWriteFrameDuration_ = {};
+        maxVideoEncodeDuration_ = {};
+        maxAudioEncodeDuration_ = {};
+    }
+
+    void writeHeldOrGeneratedSubmittedFrame(std::int64_t frameIndex)
+    {
+        if (heldRenderedSubmittedVideoFrame_) {
+            FramePtr frame{av_frame_clone(heldRenderedSubmittedVideoFrame_.get())};
+            if (!frame) {
+                throw std::runtime_error{"clone rendered held submitted video frame failed"};
+            }
+            frame->pts = frameIndex;
+            encode(frame.get(), submittedVideoSource_);
+            writeAudioUntil(frameIndex + 1, true);
+            if (liveInfoFramesRemaining_ > 0) {
+                --liveInfoFramesRemaining_;
+            }
+            return;
+        }
+
+        FramePtr frame;
+        if (heldSubmittedVideoFrame_) {
+            frame.reset(av_frame_clone(heldSubmittedVideoFrame_.get()));
+        } else {
+            frame = generatedVideoFrame(frameIndex);
+        }
+        if (!frame) {
+            throw std::runtime_error{"create held submitted video frame failed"};
+        }
+        writeSubmittedVideoFrame(std::move(frame), frameIndex);
+    }
+
+    void writeSubmittedVideoFrame(FramePtr frame, std::int64_t frameIndex)
+    {
+        frame->pts = frameIndex;
+        auto overlayFrame = identOverlay_->render(frame.get());
+        overlayFrame->pts = frameIndex;
+        if (streamInfoOverlay_ == nullptr && liveInfoFramesRemaining_ > 0
+            && streamInfo_.has_value() && !streamInfo_->empty()) {
+            streamInfoOverlay_ = std::make_unique<OverlayRenderer>(streamInfoFilter(*streamInfo_, frameRate_),
+                                                                    outputWidthPixels(),
+                                                                    outputHeightPixels(),
+                                                                    outputPixelFormat(),
+                                                                    frameRate_);
+        }
+        if (streamInfoOverlay_ != nullptr && liveInfoFramesRemaining_ > 0) {
+            overlayFrame = streamInfoOverlay_->render(overlayFrame.get());
+            overlayFrame->pts = frameIndex;
+            --liveInfoFramesRemaining_;
+        }
+        if (submittedVideoSource_ == "fallback-video") {
+            heldRenderedSubmittedVideoFrame_.reset(av_frame_clone(overlayFrame.get()));
+            if (!heldRenderedSubmittedVideoFrame_) {
+                throw std::runtime_error{"cache rendered fallback video frame failed"};
+            }
+        }
+        encode(overlayFrame.get(), submittedVideoSource_);
+        writeAudioUntil(frameIndex + 1, true);
     }
 
     FramePtr compositedFallbackFrame(AVFrame* frame, const AVFrame* contentIdentity, std::int64_t frameIndex)
@@ -5176,9 +5490,6 @@ private:
         activeSlidePaths_ = isDecember() ? slideFilesIn(config_.fallback.christmasSlideDirectory) : std::vector<std::filesystem::path>{};
         if (activeSlidePaths_.empty()) {
             activeSlidePaths_ = slideFilesIn(config_.fallback.slideDirectory);
-        }
-        if (activeSlidePaths_.empty() && !config_.fallback.stillPath.empty()) {
-            activeSlidePaths_.push_back(config_.fallback.stillPath);
         }
         if (!activeSlidePaths_.empty()) {
             std::mt19937 generator{std::random_device{}()};
@@ -5322,9 +5633,11 @@ private:
 
     void sendVideoFrame(AVFrame* safeFrame)
     {
+        const auto started = std::chrono::steady_clock::now();
 #if defined(WH_REPEATER_HAVE_GSTREAMER)
         if (gstMuxer_) {
             gstMuxer_->writeVideoFrame(safeFrame);
+            recordVideoEncodeDurationLocked(std::chrono::steady_clock::now() - started);
             return;
         }
 #endif
@@ -5348,6 +5661,7 @@ private:
             writeTransportPacket(packet.get());
             av_packet_unref(packet.get());
         }
+        recordVideoEncodeDurationLocked(std::chrono::steady_clock::now() - started);
     }
 
     FramePtr generatedVideoFrame(std::int64_t pts)
@@ -5368,11 +5682,7 @@ private:
 
     AVFrame* fixedVideoFrame(AVFrame* frame, std::string_view source, FramePtr& generatedFrame)
     {
-        std::int64_t pts = frame != nullptr ? frame->pts : AV_NOPTS_VALUE;
-        if (pts == AV_NOPTS_VALUE || (lastVideoPts_ != AV_NOPTS_VALUE && pts <= lastVideoPts_)) {
-            pts = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
-            std::cerr << "wh-repeater: " << source << " frame timestamp repaired to " << pts << '\n';
-        }
+        const auto pts = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
 
         const bool valid = frame != nullptr
             && frame->format == outputPixelFormat()
@@ -5491,6 +5801,7 @@ private:
 
     void writeAudioFrame(int samples, bool preferSubmittedAudio)
     {
+        const auto started = std::chrono::steady_clock::now();
 #if defined(WH_REPEATER_HAVE_GSTREAMER)
         if (gstMuxer_) {
             std::vector<float> audio(static_cast<std::size_t>(samples));
@@ -5507,6 +5818,7 @@ private:
             const auto pts = audioSampleIndex_;
             audioSampleIndex_ += samples;
             gstMuxer_->writeAudioSamples(audio.data(), samples, pts);
+            recordAudioEncodeDurationLocked(std::chrono::steady_clock::now() - started);
             return;
         }
 #endif
@@ -5533,6 +5845,7 @@ private:
             }
             submittedAudioConsumed_.notify_one();
             usedSubmittedAudio = true;
+            ++statsSubmittedAudioOutputFrames_;
         } else {
             auto* plane = reinterpret_cast<float*>(frame->data[0]);
             for (int index = 0; index < samples; ++index) {
@@ -5550,6 +5863,7 @@ private:
 
         checkAv(avcodec_send_frame(audioCodec_, frame.get()), usedSubmittedAudio ? "send submitted audio frame" : "send fallback audio frame");
         drainAudioPackets();
+        recordAudioEncodeDurationLocked(std::chrono::steady_clock::now() - started);
     }
 
     void flushAudio()
@@ -5677,11 +5991,29 @@ private:
     bool firstIdent_{true};
     std::int64_t lastVideoPts_{AV_NOPTS_VALUE};
     std::deque<FramePtr> submittedVideoFrames_;
+    FramePtr heldSubmittedVideoFrame_;
+    FramePtr heldRenderedSubmittedVideoFrame_;
     std::string submittedVideoSource_{"submitted"};
+    std::int64_t submittedVideoBaseFrame_{AV_NOPTS_VALUE};
     std::chrono::steady_clock::time_point submittedVideoAt_{};
     std::condition_variable_any submittedVideoConsumed_;
     AudioFifoPtr submittedAudioFifo_;
+    std::string submittedAudioSource_{"submitted"};
+    std::int64_t submittedAudioStartSample_{0};
     std::condition_variable_any submittedAudioConsumed_;
+    std::chrono::steady_clock::time_point statsStartedAt_{};
+    std::chrono::steady_clock::time_point nextStatsLogAt_{};
+    std::uint64_t statsOutputFrames_{0};
+    std::uint64_t statsGeneratedVideoFrames_{0};
+    std::uint64_t statsSubmittedVideoFrames_{0};
+    std::uint64_t statsHeldVideoFrames_{0};
+    std::uint64_t statsAudioFrames_{0};
+    std::uint64_t statsSubmittedAudioInputFrames_{0};
+    std::uint64_t statsSubmittedAudioInputSamples_{0};
+    std::uint64_t statsSubmittedAudioOutputFrames_{0};
+    std::chrono::steady_clock::duration maxWriteFrameDuration_{};
+    std::chrono::steady_clock::duration maxVideoEncodeDuration_{};
+    std::chrono::steady_clock::duration maxAudioEncodeDuration_{};
     mutable std::mutex outputMutex_;
 };
 
@@ -5890,9 +6222,6 @@ void MediaPipeline::enterFallback(std::chrono::steady_clock::time_point now, boo
     if (!transmitEnabled_) {
         std::cout << " with TX muted";
     }
-    if (!config_.fallback.stillPath.empty()) {
-        std::cout << " still=" << config_.fallback.stillPath;
-    }
     if (!config_.fallback.videoPaths.empty()) {
         std::cout << " videos=" << config_.fallback.videoPaths.size();
     }
@@ -5927,7 +6256,20 @@ void MediaPipeline::workerLoop()
     std::unique_ptr<GStreamerAnalogueCaptureTranscoder> gstAnalogueTranscoder;
 #endif
     auto nextFrameAt = std::chrono::steady_clock::now();
+    auto nextSlowOutputLogAt = std::chrono::steady_clock::time_point{};
     std::chrono::steady_clock::time_point liveAttemptStartedAt{};
+    auto advanceFrameClock = [](std::chrono::steady_clock::time_point& nextFrame,
+                                std::chrono::microseconds frameInterval) {
+        nextFrame += frameInterval;
+        const auto now = std::chrono::steady_clock::now();
+        if (nextFrame < now) {
+            nextFrame = now;
+        }
+    };
+    auto nextFrameDeadline = [&] {
+        const auto now = std::chrono::steady_clock::now();
+        return nextFrameAt > now ? nextFrameAt : now;
+    };
 
     if (config_.media.backend != "gstreamer" && config_.streaming.rtmp.enabled && !config_.streaming.rtmp.url.empty()) {
         rtmpMuxer = std::make_unique<PersistentRtmpMuxer>(config_);
@@ -5993,7 +6335,7 @@ void MediaPipeline::workerLoop()
                 std::this_thread::sleep_until(nextFrameAt);
                 fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
                 fallbackMuxer->writeFrame(fallbackFrameIndex++);
-                nextFrameAt += std::chrono::microseconds{1'000'000 / outputFrameRate(config_)};
+                advanceFrameClock(nextFrameAt, std::chrono::microseconds{1'000'000 / outputFrameRate(config_)});
                 continue;
             }
 
@@ -6014,7 +6356,7 @@ void MediaPipeline::workerLoop()
                 bool playbackFinished{};
                 {
                     std::unique_lock lock{mutex_};
-                    inputReady_.wait_for(lock, std::chrono::milliseconds{20}, [this, &fallbackVideoTranscoder] {
+                    inputReady_.wait_until(lock, nextFrameDeadline(), [this, &fallbackVideoTranscoder] {
                         return stopping_ || mode_ != MediaPipelineMode::fallbackVideo
                             || (fallbackVideoTranscoder && fallbackVideoTranscoder->finished());
                     });
@@ -6039,9 +6381,21 @@ void MediaPipeline::workerLoop()
                     fallbackMuxer->setNotice(std::nullopt);
                     std::this_thread::sleep_until(nextFrameAt);
                     fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
+                    const auto writeStartedAt = std::chrono::steady_clock::now();
                     fallbackMuxer->writeFrame(fallbackFrameIndex++, true);
-                    const auto now = std::chrono::steady_clock::now();
-                    nextFrameAt = std::max(nextFrameAt + frameInterval, now + frameInterval);
+                    const auto writeDuration = std::chrono::steady_clock::now() - writeStartedAt;
+                    if (writeDuration > frameInterval) {
+                        const auto logNow = std::chrono::steady_clock::now();
+                        if (logNow >= nextSlowOutputLogAt) {
+                            std::cerr << "wh-repeater: fallback video output frame took "
+                                      << std::chrono::duration_cast<std::chrono::milliseconds>(writeDuration).count()
+                                      << " ms; target interval "
+                                      << std::chrono::duration_cast<std::chrono::milliseconds>(frameInterval).count()
+                                      << " ms\n";
+                            nextSlowOutputLogAt = logNow + std::chrono::seconds{5};
+                        }
+                    }
+                    advanceFrameClock(nextFrameAt, frameInterval);
                 }
             } else if (mode == MediaPipelineMode::analogue) {
                 retireLiveTranscoders();
@@ -6057,7 +6411,7 @@ void MediaPipeline::workerLoop()
                 bool captureFinished{};
                 {
                     std::unique_lock lock{mutex_};
-                    inputReady_.wait_for(lock, std::chrono::milliseconds{20}, [this, &analogueTranscoder
+                    inputReady_.wait_until(lock, nextFrameDeadline(), [this, &analogueTranscoder
 #if defined(WH_REPEATER_HAVE_GSTREAMER)
                                                                                  , &gstAnalogueTranscoder
 #endif
@@ -6098,8 +6452,7 @@ void MediaPipeline::workerLoop()
                     std::this_thread::sleep_until(nextFrameAt);
                     fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
                     fallbackMuxer->writeFrame(fallbackFrameIndex++, true);
-                    const auto now = std::chrono::steady_clock::now();
-                    nextFrameAt = std::max(nextFrameAt + frameInterval, now + frameInterval);
+                    advanceFrameClock(nextFrameAt, frameInterval);
                 }
             } else if (mode == MediaPipelineMode::retransmit) {
                 analogueTranscoder.reset();
@@ -6124,7 +6477,7 @@ void MediaPipeline::workerLoop()
                 liveReady = liveReady || (gstLiveTranscoder && gstLiveTranscoder->ready());
 #endif
                 std::unique_lock lock{mutex_};
-                inputReady_.wait_for(lock, std::chrono::milliseconds{20}, [this, &liveTranscoder
+                inputReady_.wait_until(lock, nextFrameDeadline(), [this, &liveTranscoder
 #if defined(WH_REPEATER_HAVE_GSTREAMER)
                                                                              , &gstLiveTranscoder
 #endif
@@ -6227,8 +6580,7 @@ void MediaPipeline::workerLoop()
                     std::this_thread::sleep_until(nextFrameAt);
                     fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
                     fallbackMuxer->writeFrame(fallbackFrameIndex++, true);
-                    const auto now = std::chrono::steady_clock::now();
-                    nextFrameAt = std::max(nextFrameAt + frameInterval, now + frameInterval);
+                    advanceFrameClock(nextFrameAt, frameInterval);
                 } else {
                     if (notice.has_value()) {
                         fallbackMuxer->setNotice(notice);
@@ -6247,7 +6599,7 @@ void MediaPipeline::workerLoop()
                     std::this_thread::sleep_until(nextFrameAt);
                     fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
                     fallbackMuxer->writeFrame(fallbackFrameIndex++);
-                    nextFrameAt += std::chrono::microseconds{1'000'000 / outputFrameRate(config_)};
+                    advanceFrameClock(nextFrameAt, std::chrono::microseconds{1'000'000 / outputFrameRate(config_)});
                 }
                 if (liveFinished) {
                     retireLiveTranscoders();

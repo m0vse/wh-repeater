@@ -20,7 +20,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WH Repeater</title>
-  <link rel="stylesheet" href="/styles.css?v=20260608-rtmp1">
+  <link rel="stylesheet" href="/styles.css?v=20260612-header-status">
 </head>
 <body>
   <header class="topbar">
@@ -28,6 +28,7 @@
       <h1>WH Repeater</h1>
       <p id="api-state">Connecting</p>
     </div>
+    <div class="header-status" id="save-state" aria-live="polite"></div>
     <div class="actions">
       <button id="refresh" type="button">Refresh</button>
       <button id="service-restart" type="button">Restart</button>
@@ -42,7 +43,6 @@
     <section class="panel">
       <div class="panel-head">
         <h2>Repeater Config</h2>
-        <span id="save-state"></span>
       </div>
 
       <div class="config-sections">
@@ -190,103 +190,120 @@
 
         <section class="config-section">
           <h3>Media Pipeline</h3>
-          <div class="form-grid">
-            <label>
-              Calculated mux rate kbps
-              <input id="mux-rate" type="number" min="1" readonly>
-            </label>
-            <label>
-              Calculated video bitrate kbps
-              <input id="video-bitrate" type="number" min="1" readonly>
-            </label>
-            <label>
-              Audio bitrate kbps
-              <input id="audio-bitrate" type="number" min="1">
-            </label>
-            <label>
-              Media backend
-              <select id="media-backend">
-                <option value="ffmpeg">FFmpeg</option>
-                <option value="gstreamer">GStreamer</option>
-              </select>
-            </label>
-            <label>
-              Output width
-              <input id="output-width" type="number" min="320" max="1920" step="2">
-            </label>
-            <label>
-              Output height
-              <input id="output-height" type="number" min="240" max="1080" step="2">
-            </label>
-            <label>
-              Output fps
-              <input id="output-frame-rate" type="number" min="1" max="50">
-            </label>
-            <label>
-              H.264 profile
-              <select id="h264-profile">
-                <option value="baseline">Baseline</option>
-                <option value="main">Main</option>
-                <option value="high">High</option>
-              </select>
-            </label>
-            <label>
-              H.264 level
-              <select id="h264-level">
-                <option value="auto">Auto</option>
-                <option value="3">3</option>
-                <option value="3.1">3.1</option>
-                <option value="4">4</option>
-              </select>
-            </label>
-            <label>
-              Fallback timeout ms
-              <input id="fallback-timeout" type="number" min="0">
-            </label>
-            <label class="check">
-              <input id="fallback-enabled" type="checkbox">
-              Fallback enabled
-            </label>
-            <label class="check">
-              <input id="fallback-hardware-decode" type="checkbox">
-              Try hardware decode
-            </label>
-            <label class="wide">
-              Watermark text
-              <input id="watermark-text" type="text">
-            </label>
-            <label class="wide">
-              Fallback still path
-              <input id="fallback-still" type="text" placeholder="/var/lib/wh-repeater/fallback.jpg">
-            </label>
-            <label class="wide">
-              Slide folder
-              <input id="fallback-slide-directory" type="text" placeholder="/var/lib/wh-repeater/slides">
-            </label>
-            <label class="wide">
-              Christmas slide folder
-              <input id="fallback-xmas-slide-directory" type="text" placeholder="/var/lib/wh-repeater/slides/christmas">
-            </label>
-            <label>
-              Slide duration seconds
-              <input id="fallback-slide-duration" type="number" min="1" value="10">
-            </label>
-            <label class="wide">
-              Fallback video paths
-              <input id="fallback-videos" type="text" placeholder="/var/lib/wh-repeater/idle.ts,/var/lib/wh-repeater/ident.mp4">
-            </label>
-            <div class="actions wide">
-              <button id="fallback-play-video" type="button">Play first fallback video now</button>
-              <button id="fallback-stop-video" type="button">Stop fallback video</button>
+          <div class="config-subsections">
+            <div class="config-subsection">
+              <h4>Output</h4>
+              <div class="form-grid">
+                <label>
+                  Calculated mux rate kbps
+                  <input id="mux-rate" type="number" min="1" readonly>
+                </label>
+                <label>
+                  Calculated video bitrate kbps
+                  <input id="video-bitrate" type="number" min="1" readonly>
+                </label>
+                <label>
+                  Audio bitrate kbps
+                  <input id="audio-bitrate" type="number" min="1">
+                </label>
+                <label>
+                  Media backend
+                  <select id="media-backend">
+                    <option value="ffmpeg">FFmpeg</option>
+                    <option value="gstreamer">GStreamer</option>
+                  </select>
+                </label>
+                <label>
+                  Output width
+                  <input id="output-width" type="number" min="320" max="1920" step="2">
+                </label>
+                <label>
+                  Output height
+                  <input id="output-height" type="number" min="240" max="1080" step="2">
+                </label>
+                <label>
+                  Output fps
+                  <input id="output-frame-rate" type="number" min="1" max="50">
+                </label>
+                <label>
+                  H.264 profile
+                  <select id="h264-profile">
+                    <option value="baseline">Baseline</option>
+                    <option value="main">Main</option>
+                    <option value="high">High</option>
+                  </select>
+                </label>
+                <label>
+                  H.264 level
+                  <select id="h264-level">
+                    <option value="auto">Auto</option>
+                    <option value="3">3</option>
+                    <option value="3.1">3.1</option>
+                    <option value="4">4</option>
+                  </select>
+                </label>
+                <label class="wide">
+                  Watermark text
+                  <input id="watermark-text" type="text">
+                </label>
+              </div>
             </div>
-            <label class="check">
-              <input id="rtmp-enabled" type="checkbox">
-              RTMP streaming enabled
-            </label>
-            <label class="wide">
-              RTMP URL
-              <input id="rtmp-url" type="text" placeholder="rtmp://server/live/stream-key">
-            </label>
+
+            <div class="config-subsection">
+              <h4>Fallback</h4>
+              <div class="form-grid">
+                <label>
+                  Fallback timeout ms
+                  <input id="fallback-timeout" type="number" min="0">
+                </label>
+                <label>
+                  Slide duration seconds
+                  <input id="fallback-slide-duration" type="number" min="1" value="10">
+                </label>
+                <label class="check">
+                  <input id="fallback-enabled" type="checkbox">
+                  Fallback enabled
+                </label>
+                <label class="check">
+                  <input id="fallback-hardware-decode" type="checkbox">
+                  Try hardware decode
+                </label>
+                <label class="wide">
+                  Slide folder
+                  <input id="fallback-slide-directory" type="text" placeholder="/var/lib/wh-repeater/slides">
+                </label>
+                <label class="wide">
+                  Christmas slide folder
+                  <input id="fallback-xmas-slide-directory" type="text" placeholder="/var/lib/wh-repeater/slides/christmas">
+                </label>
+                <label class="wide">
+                  Fallback video folder
+                  <input id="fallback-video-directory" type="text" placeholder="/home/pi/Videos">
+                </label>
+                <label class="wide">
+                  Fallback video
+                  <select id="fallback-video-select"></select>
+                </label>
+                <div class="actions wide">
+                  <button id="fallback-play-video" type="button">Play selected fallback video</button>
+                  <button id="fallback-stop-video" type="button">Stop fallback video</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="config-subsection">
+              <h4>RTMP</h4>
+              <div class="form-grid compact">
+                <label class="check">
+                  <input id="rtmp-enabled" type="checkbox">
+                  RTMP streaming enabled
+                </label>
+                <label class="wide">
+                  RTMP URL
+                  <input id="rtmp-url" type="text" placeholder="rtmp://server/live/stream-key">
+                </label>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -546,6 +563,6 @@
     </div>
   </template>
 
-  <script src="/app.js?v=20260611-gstreamer1" defer></script>
+  <script src="/app.js?v=20260612-status-timeout" defer></script>
 </body>
 </html>

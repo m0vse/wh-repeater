@@ -19,11 +19,13 @@
 
 #include <arpa/inet.h>
 #include <array>
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <netinet/in.h>
 #include <sstream>
@@ -262,6 +264,97 @@ std::string readHttpRequest(int clientFd)
     return request;
 }
 
+std::filesystem::path expandUserPath(std::string_view path)
+{
+    if (path == "~") {
+        if (const auto* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+            return home;
+        }
+    }
+    if (path.size() > 2 && path[0] == '~' && path[1] == '/') {
+        if (const auto* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+            return std::filesystem::path{home} / std::string{path.substr(2)};
+        }
+    }
+    return std::filesystem::path{std::string{path}};
+}
+
+bool supportedFallbackVideoFile(const std::filesystem::path& path)
+{
+    auto extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return extension == ".mp4"
+        || extension == ".m4v"
+        || extension == ".mov"
+        || extension == ".mkv"
+        || extension == ".ts"
+        || extension == ".m2ts"
+        || extension == ".mpeg"
+        || extension == ".mpg";
+}
+
+int hexValue(char ch)
+{
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return 10 + ch - 'a';
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return 10 + ch - 'A';
+    }
+    return -1;
+}
+
+std::string urlDecode(std::string_view value)
+{
+    std::string out;
+    out.reserve(value.size());
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        if (value[index] == '+') {
+            out.push_back(' ');
+        } else if (value[index] == '%' && index + 2 < value.size()) {
+            const auto high = hexValue(value[index + 1]);
+            const auto low = hexValue(value[index + 2]);
+            if (high >= 0 && low >= 0) {
+                out.push_back(static_cast<char>((high << 4) | low));
+                index += 2;
+            } else {
+                out.push_back(value[index]);
+            }
+        } else {
+            out.push_back(value[index]);
+        }
+    }
+    return out;
+}
+
+std::optional<std::string> queryParameter(std::string_view path, std::string_view name)
+{
+    const auto queryStart = path.find('?');
+    if (queryStart == std::string_view::npos) {
+        return std::nullopt;
+    }
+    auto cursor = queryStart + 1;
+    while (cursor <= path.size()) {
+        const auto next = path.find('&', cursor);
+        const auto item = path.substr(cursor, next == std::string_view::npos ? std::string_view::npos : next - cursor);
+        const auto equals = item.find('=');
+        const auto key = equals == std::string_view::npos ? item : item.substr(0, equals);
+        if (key == name) {
+            return urlDecode(equals == std::string_view::npos ? std::string_view{} : item.substr(equals + 1));
+        }
+        if (next == std::string_view::npos) {
+            break;
+        }
+        cursor = next + 1;
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 ApiServer::ApiServer(ApiServerConfig config)
@@ -453,6 +546,55 @@ void ApiServer::handleClient(int clientFd)
     if (method == "GET" && path == "/api/config") {
         const auto body = configJson();
         writeResponse(clientFd, "200 OK", "application/json", body);
+        return;
+    }
+
+    if (method == "GET" && path.rfind("/api/fallback/videos", 0) == 0) {
+        RepeaterConfig config;
+        {
+            std::lock_guard lock{snapshotMutex_};
+            config = repeaterConfig_;
+        }
+
+        const auto requestedDirectory = queryParameter(path, "directory");
+        const auto configuredDirectory = requestedDirectory.has_value() && !requestedDirectory->empty()
+            ? *requestedDirectory
+            : (config.fallback.videoDirectory.empty() ? std::string{"/home/pi/Videos"} : config.fallback.videoDirectory);
+        const auto directory = expandUserPath(configuredDirectory);
+
+        std::vector<std::filesystem::directory_entry> entries;
+        std::error_code ec;
+        if (std::filesystem::is_directory(directory, ec)) {
+            for (std::filesystem::directory_iterator it{directory, ec}, end; !ec && it != end; it.increment(ec)) {
+                const auto& entry = *it;
+                if (entry.is_regular_file(ec) && supportedFallbackVideoFile(entry.path())) {
+                    entries.push_back(entry);
+                }
+            }
+        }
+        std::sort(entries.begin(), entries.end(), [](const auto& left, const auto& right) {
+            return left.path().filename().string() < right.path().filename().string();
+        });
+
+        std::ostringstream body;
+        body << "{"
+             << "\"directory\":" << jsonString(directory.string()) << ","
+             << "\"videos\":[";
+        for (std::size_t index = 0; index < entries.size(); ++index) {
+            if (index != 0) {
+                body << ",";
+            }
+            body << "{"
+                 << "\"name\":" << jsonString(entries[index].path().filename().string()) << ","
+                 << "\"path\":" << jsonString(entries[index].path().string())
+                 << "}";
+        }
+        body << "]";
+        if (ec) {
+            body << ",\"error\":" << jsonString(ec.message());
+        }
+        body << "}\n";
+        writeResponse(clientFd, "200 OK", "application/json", body.str());
         return;
     }
 

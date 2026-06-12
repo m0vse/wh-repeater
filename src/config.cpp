@@ -732,8 +732,8 @@ RepeaterConfig configFromJson(std::string_view text)
         if (const auto* enabled = optionalMember(*fallback, "enabled")) {
             config.fallback.enabled = jsonBool(*enabled, "fallback.enabled");
         }
-        if (const auto* stillPath = optionalMember(*fallback, "stillPath")) {
-            config.fallback.stillPath = jsonText(*stillPath, "fallback.stillPath");
+        if (const auto* videoDirectory = optionalMember(*fallback, "videoDirectory")) {
+            config.fallback.videoDirectory = jsonText(*videoDirectory, "fallback.videoDirectory");
         }
         if (const auto* slideDirectory = optionalMember(*fallback, "slideDirectory")) {
             config.fallback.slideDirectory = jsonText(*slideDirectory, "fallback.slideDirectory");
@@ -1010,7 +1010,7 @@ std::string configToJson(const RepeaterConfig& config)
         << "  },\n"
         << "  \"fallback\": {\n"
         << "    \"enabled\": " << (config.fallback.enabled ? "true" : "false") << ",\n"
-        << "    \"stillPath\": " << jsonString(config.fallback.stillPath) << ",\n"
+        << "    \"videoDirectory\": " << jsonString(config.fallback.videoDirectory) << ",\n"
         << "    \"slideDirectory\": " << jsonString(config.fallback.slideDirectory) << ",\n"
         << "    \"christmasSlideDirectory\": " << jsonString(config.fallback.christmasSlideDirectory) << ",\n"
         << "    \"slideDurationSeconds\": " << (config.fallback.slideDuration.count() / 1000) << ",\n"

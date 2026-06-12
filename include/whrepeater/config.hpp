@@ -60,8 +60,8 @@ struct PlutoConfig {
 
 struct FallbackConfig {
     bool enabled{true};
-    std::string stillPath;
     std::vector<std::string> videoPaths;
+    std::string videoDirectory{"/home/pi/Videos"};
     std::string slideDirectory{"/var/lib/wh-repeater/slides"};
     std::string christmasSlideDirectory{"/var/lib/wh-repeater/slides/christmas"};
     std::chrono::milliseconds slideDuration{10000};
