@@ -54,6 +54,7 @@
               <select id="operating-mode">
                 <option value="local-transcode">Local transcode</option>
                 <option value="ts-gateway">TS gateway</option>
+                <option value="pc-gateway">PC gateway</option>
               </select>
             </label>
             <label>
@@ -266,6 +267,34 @@
                 <label>
                   PC destination UDP port
                   <input id="ts-gateway-port" type="number" min="1" max="65535">
+                </label>
+                <label>
+                  PC listen address
+                  <input id="gateway-input-address" type="text" placeholder="0.0.0.0">
+                </label>
+                <label>
+                  PC listen UDP port
+                  <input id="gateway-input-port" type="number" min="1" max="65535">
+                </label>
+                <label>
+                  PC UDP packet size
+                  <input id="gateway-input-packet-size" type="number" min="188" step="188">
+                </label>
+                <label class="checkbox">
+                  <input id="pi-status-enabled" type="checkbox">
+                  Pi status polling
+                </label>
+                <label>
+                  Pi API address
+                  <input id="pi-status-address" type="text" placeholder="192.168.1.10">
+                </label>
+                <label>
+                  Pi API port
+                  <input id="pi-status-port" type="number" min="1" max="65535">
+                </label>
+                <label>
+                  Pi status poll ms
+                  <input id="pi-status-poll-interval" type="number" min="100" step="100">
                 </label>
               </div>
             </div>

@@ -57,6 +57,17 @@
     "address": "127.0.0.1",
     "port": 5000
   },
+  "gatewayInput": {
+    "listenAddress": "0.0.0.0",
+    "listenPort": 5000,
+    "packetSize": 1316
+  },
+  "piStatus": {
+    "enabled": true,
+    "address": "127.0.0.1",
+    "port": 8080,
+    "pollIntervalMs": 500
+  },
   "hardwarePtt": {
     "enabled": false,
     "chip": "/dev/gpiochip0",

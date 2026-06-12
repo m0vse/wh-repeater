@@ -30,7 +30,8 @@ The Pi gateway remains responsible for deterministic local hardware work:
 - selecting the best active NIM input;
 - forwarding selected raw MPEG-TS packets over UDP.
 
-The PC server should own media-heavy and operator-facing work:
+The PC server should run wh-repeater in `pc-gateway` mode and own media-heavy
+and operator-facing work:
 
 - TS validation, decode, transcode, watermark, ident, fallback, slideshow, and
   generated status video;
@@ -62,6 +63,28 @@ In `ts-gateway` mode:
 
 `local-transcode` remains the existing single-Pi mode and keeps the fixed media
 stream contract in [`media-stream-contract.md`](media-stream-contract.md).
+
+Set the PC config top-level `mode` to `pc-gateway`.
+
+```json
+{
+  "mode": "pc-gateway",
+  "gatewayInput": {
+    "listenAddress": "0.0.0.0",
+    "listenPort": 5000,
+    "packetSize": 1316
+  }
+}
+```
+
+In `pc-gateway` mode:
+
+- the daemon does not initialise NIM hardware or scan receivers;
+- UDP MPEG-TS received from the Pi is treated as the live DVB input;
+- fallback/status generation, decode/transcode, RTMP, Pluto, MQTT status, and
+  hardware PTT remain on the PC;
+- if no UDP packets arrive within `fallback.inputTimeoutMs`, the media path can
+  fall back to the configured beacon/status output.
 
 ## HTTP API
 
@@ -149,6 +172,75 @@ Receiver objects include:
 The PC server should poll `/api/status` while a push/event API does not yet
 exist. Start with the configured `statusIntervalMs`; reduce polling only if the
 Pi loop and network remain stable.
+
+## PC Status Mirroring
+
+When the PC runs in `pc-gateway` mode, it can poll the Pi API and mirror the
+Pi's receiver status into the PC dashboard. This keeps the operator UI looking
+like the original four-NIM dashboard even though the PC owns media/output and
+the Pi owns only Winterhill hardware.
+
+PC config:
+
+```json
+{
+  "mode": "pc-gateway",
+  "gatewayInput": {
+    "listenAddress": "0.0.0.0",
+    "listenPort": 5000,
+    "packetSize": 1316
+  },
+  "piStatus": {
+    "enabled": true,
+    "address": "192.168.99.181",
+    "port": 8080,
+    "pollIntervalMs": 500
+  }
+}
+```
+
+The PC polls:
+
+```text
+GET http://<piStatus.address>:<piStatus.port>/api/status
+```
+
+The PC currently reuses these Pi response fields directly:
+
+- `activeReceiver`;
+- `receivers`;
+- `receiverTransitions`.
+
+The Pi must therefore keep the existing `ts-gateway` `/api/status` shape stable.
+In particular, every NIM receiver object should include the fields already used
+by the web UI:
+
+- `id`, `name`, `type`, `deviceId`, `nim`, `tuner`, `antenna`;
+- `state`, `target`, `merDb`, `dNumberDb`, `serviceName`, `modulation`;
+- `transportPackets`, `continuityErrors`, `updatedMsAgo`.
+
+If the Pi is unavailable, the PC dashboard falls back to showing its local UDP
+gateway input as a single receiver. The PC-side poller uses short nonblocking
+network timeouts so an offline Pi does not stall media, fallback, Pluto, RTMP,
+or API handling.
+
+For the current GB3GV test PC, use:
+
+- PC address: `192.168.99.113`;
+- Pi API/status address: `192.168.99.181`;
+- UDP MPEG-TS from Pi to PC: `192.168.99.113:5000`.
+
+The Pi-side config should therefore include:
+
+```json
+{
+  "mode": "ts-gateway",
+  "tsGateway": {
+    "address": "192.168.99.113",
+    "port": 5000
+  }
+}
+```
 
 ## UDP MPEG-TS Contract
 

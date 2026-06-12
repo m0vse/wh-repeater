@@ -29,6 +29,9 @@ This is the first working streaming test build. It can:
 - run in `ts-gateway` mode, where the Pi scans/selects the Winterhill receiver
   and forwards the selected raw MPEG-TS to a configured PC over UDP as 1316-byte
   datagrams;
+- run in `pc-gateway` mode on that PC, where this daemon receives the Pi UDP
+  MPEG-TS and owns decode/transcode, fallback/status generation, RTMP, Pluto,
+  and operator-facing output;
 - isolate FFmpeg/V4L2 media handling in a supervised child process so the
   control daemon can restart media output after a media-worker failure;
 - publish PlutoPlus/F5OEO control over MQTT, including TX mute/PTT state;
@@ -59,7 +62,10 @@ media/retransmit path. `ts-gateway` keeps the Winterhill NIM scanning and active
 receiver selection on the Pi, but bypasses the media worker and forwards raw
 188-byte MPEG-TS packets to `tsGateway.address`/`tsGateway.port`, grouped as
 seven packets per UDP datagram. FFmpeg, GStreamer, and H.264 hardware codec
-availability are not required in `ts-gateway` mode.
+availability are not required in `ts-gateway` mode. `pc-gateway` is the matching
+PC-side role: it skips NIM hardware access, listens on `gatewayInput`, and feeds
+the received UDP MPEG-TS into the media worker for fallback, RTMP, and Pluto
+output.
 The Pi/PC gateway boundary is documented in
 [`docs/pi-gateway-api.md`](docs/pi-gateway-api.md).
 
@@ -117,6 +123,20 @@ current working directory.
 The installed service expects mutable configuration in
 `/etc/wh-repeater/wh-repeater.json` and the binary at
 `/usr/local/bin/wh-repeater`.
+
+For this PC-side gateway role, build and deploy the daemon, web UI, systemd
+unit, and nginx site together with:
+
+```sh
+sudo ./deploy/install.sh
+```
+
+The script preserves an existing `/etc/wh-repeater/wh-repeater.json`. On a fresh
+install it seeds that config with `mode` set to `pc-gateway`; override this with
+`DEPLOY_MODE=ts-gateway` or `DEPLOY_MODE=local-transcode` when installing a Pi
+or legacy single-box system.
+
+Manual install commands are:
 
 ```sh
 sudo install -m 0755 build/wh-repeater /usr/local/bin/wh-repeater
@@ -179,8 +199,9 @@ sudo chmod 0644 /etc/ssl/wh-repeater/wh-repeater.crt
 
 The main sections are:
 
-- `mode`: `local-transcode` for the existing Pi media path, or `ts-gateway` for
-  raw TS forwarding to a PC;
+- `mode`: `local-transcode` for the existing Pi media path, `ts-gateway` for
+  raw TS forwarding from the Pi to a PC, or `pc-gateway` for the PC-side media
+  and output role;
 - `receivers`: RX1-RX4 scan targets, dwell time, and hang time;
 - `analogue.capture`: generic USB/V4L2 analogue capture configuration;
 - `analogue.sd1`: parked SD1 analogue configuration, disabled by default;
@@ -197,6 +218,10 @@ The main sections are:
   complete-path `gstreamer`;
 - `tsGateway`: UDP destination address and port for `ts-gateway` raw MPEG-TS
   forwarding;
+- `gatewayInput`: UDP bind address, port, and packet size for `pc-gateway`
+  receive from the Pi;
+- `piStatus`: Pi API address and polling interval used by `pc-gateway` to mirror
+  RX1-RX4 NIM status into the PC dashboard;
 - `hardwarePtt`: optional GPIO PTT output for amplifier/sequencer switching;
 - `beaconSchedule`: UTC operating hours for beacon/slideshow TX versus sleep mode;
 - `ident`: service name and ident interval;

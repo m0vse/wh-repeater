@@ -19,10 +19,12 @@
 #include "whrepeater/daemon.hpp"
 
 #include "whrepeater/api_server.hpp"
+#include "whrepeater/gateway_status_client.hpp"
 #include "whrepeater/hardware_ptt.hpp"
 #include "whrepeater/ident.hpp"
 #include "whrepeater/media_process.hpp"
 #include "whrepeater/nim_controller.hpp"
+#include "whrepeater/pc_gateway_input.hpp"
 #include "whrepeater/pluto_mqtt_status.hpp"
 #include "whrepeater/scan_scheduler.hpp"
 #include "whrepeater/sd1_controller.hpp"
@@ -384,6 +386,15 @@ int Daemon::run()
 {
     installSignalHandlers();
 
+    if (config_.mode == "pc-gateway") {
+        return runPcGateway();
+    }
+
+    return runPiGatewayOrLocal();
+}
+
+int Daemon::runPiGatewayOrLocal()
+{
     std::unique_ptr<NimController> nim;
     if (const auto* mode = std::getenv("WH_REPEATER_NIM"); mode != nullptr && std::string_view{mode} == "serit") {
         nim = std::make_unique<SeritNimController>();
@@ -603,6 +614,107 @@ int Daemon::run()
         }
     }
     nim->shutdown();
+    api.stop();
+    return 0;
+}
+
+int Daemon::runPcGateway()
+{
+    MediaProcess media{config_};
+    PcGatewayInput gatewayInput{config_.gatewayInput};
+    GatewayStatusClient gatewayStatus{config_.piStatus};
+    PlutoMqttStatusWorker plutoStatus{config_.pluto};
+    HardwarePtt hardwarePtt{config_.hardwarePtt};
+    IdentInserter ident{config_.ident};
+    ApiServer api;
+    std::optional<std::string> accessNotice;
+    std::chrono::steady_clock::time_point accessNoticeUntil{};
+    std::chrono::steady_clock::time_point lastGatewayStatusWarning{};
+
+    api.updateConfig(config_);
+    api.updateStatus({gatewayInput.receiverStatus()}, std::nullopt);
+    api.start();
+
+    std::cout << "wh-repeater PC gateway mode listening on "
+              << config_.gatewayInput.listenAddress << ':' << config_.gatewayInput.listenPort << '\n';
+    std::cout << "API listening on http://127.0.0.1:8080/api/status\n";
+
+    while (!shutdownRequested.load()) {
+        if (auto pendingConfig = api.takePendingConfig(); pendingConfig.has_value()) {
+            auto nextConfig = std::move(*pendingConfig);
+            api.updateConfig(nextConfig);
+            if (!configPath_.empty()) {
+                saveConfig(configPath_, nextConfig);
+            }
+            std::cout << "configuration accepted via API\n";
+
+            config_ = std::move(nextConfig);
+            hardwarePtt = HardwarePtt{config_.hardwarePtt};
+            ident = IdentInserter{config_.ident};
+            api.updateConfig(config_);
+            std::cout << "configuration updated via API; media, gateway input, and Pluto changes apply on service restart\n";
+        }
+
+        if (auto fallbackVideo = api.takePendingFallbackVideo(); fallbackVideo.has_value()) {
+            auto path = std::move(*fallbackVideo);
+            if (path.empty() && !config_.fallback.videoPaths.empty()) {
+                path = config_.fallback.videoPaths.front();
+            }
+            if (path.empty()) {
+                std::cerr << "wh-repeater: fallback video play requested but no fallback video path is configured\n";
+            } else {
+                media.playFallbackVideo(std::move(path));
+            }
+        }
+
+        if (api.takePendingFallbackVideoStop()) {
+            media.stopFallbackVideo();
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto beaconAllowed = beaconScheduleActive(config_.beaconSchedule);
+        api.updateBeaconSchedule(beaconAllowed);
+        api.updatePlutoStatus(plutoStatus.snapshot());
+        if (gatewayStatus.due(now)) {
+            if (auto remoteStatus = gatewayStatus.poll(now); remoteStatus.has_value()) {
+                api.updateRemoteGatewayStatus(std::move(remoteStatus));
+            } else if (gatewayStatus.lastError().has_value()) {
+                if (lastGatewayStatusWarning == std::chrono::steady_clock::time_point{}
+                    || now - lastGatewayStatusWarning >= std::chrono::seconds{10}) {
+                    lastGatewayStatusWarning = now;
+                    std::cerr << "wh-repeater: Pi gateway status unavailable: "
+                              << *gatewayStatus.lastError() << '\n';
+                }
+            }
+        }
+
+        std::optional<ActiveInput> active;
+        if (gatewayInput.active(now, config_.fallback.inputTimeout)) {
+            active = gatewayInput.activeInput();
+            accessNotice = accessMessage(config_);
+            accessNoticeUntil = now + config_.fallback.inputTimeout;
+        } else if (accessNotice.has_value() && now >= accessNoticeUntil) {
+            accessNotice.reset();
+        }
+
+        media.select(active);
+        media.setBeaconAllowed(beaconAllowed);
+        media.setAccessNotice(accessNotice);
+        gatewayInput.pump(media);
+        media.tick(now);
+
+        api.updateStatus({gatewayInput.receiverStatus()}, active);
+
+        const auto mediaForcedTransmit = media.mode() == MediaPipelineMode::fallbackVideo;
+        hardwarePtt.setTransmitEnabled(mediaForcedTransmit
+            || active.has_value()
+            || (config_.fallback.enabled && (beaconAllowed || accessNotice.has_value())));
+
+        std::this_thread::sleep_for(config_.statusInterval);
+    }
+
+    std::cout << "wh-repeater PC gateway daemon shutting down\n";
+    hardwarePtt.setTransmitEnabled(false);
     api.stop();
     return 0;
 }

@@ -627,8 +627,8 @@ RepeaterConfig configFromJson(std::string_view text)
     }
     if (const auto* mode = optionalMember(root, "mode")) {
         config.mode = jsonText(*mode, "mode");
-        if (config.mode != "local-transcode" && config.mode != "ts-gateway") {
-            throw std::runtime_error{"mode must be local-transcode or ts-gateway"};
+        if (config.mode != "local-transcode" && config.mode != "ts-gateway" && config.mode != "pc-gateway") {
+            throw std::runtime_error{"mode must be local-transcode, ts-gateway, or pc-gateway"};
         }
     }
 
@@ -801,6 +801,46 @@ RepeaterConfig configFromJson(std::string_view text)
                 throw std::runtime_error{"tsGateway.port must be between 1 and 65535"};
             }
             config.tsGateway.port = static_cast<std::uint16_t>(value);
+        }
+    }
+
+    if (const auto* gatewayInput = optionalMember(root, "gatewayInput")) {
+        if (const auto* listenAddress = optionalMember(*gatewayInput, "listenAddress")) {
+            config.gatewayInput.listenAddress = jsonText(*listenAddress, "gatewayInput.listenAddress");
+        }
+        if (const auto* listenPort = optionalMember(*gatewayInput, "listenPort")) {
+            const auto value = jsonUint32(*listenPort, "gatewayInput.listenPort");
+            if (value == 0 || value > 65535) {
+                throw std::runtime_error{"gatewayInput.listenPort must be between 1 and 65535"};
+            }
+            config.gatewayInput.listenPort = static_cast<std::uint16_t>(value);
+        }
+        if (const auto* packetSize = optionalMember(*gatewayInput, "packetSize")) {
+            const auto value = jsonUint32(*packetSize, "gatewayInput.packetSize");
+            if (value == 0 || value % 188 != 0) {
+                throw std::runtime_error{"gatewayInput.packetSize must be a positive multiple of 188"};
+            }
+            config.gatewayInput.packetSize = value;
+        }
+    }
+
+    if (const auto* piStatus = optionalMember(root, "piStatus")) {
+        if (const auto* enabled = optionalMember(*piStatus, "enabled")) {
+            config.piStatus.enabled = jsonBool(*enabled, "piStatus.enabled");
+        }
+        if (const auto* address = optionalMember(*piStatus, "address")) {
+            config.piStatus.address = jsonText(*address, "piStatus.address");
+        }
+        if (const auto* port = optionalMember(*piStatus, "port")) {
+            const auto value = jsonUint32(*port, "piStatus.port");
+            if (value == 0 || value > 65535) {
+                throw std::runtime_error{"piStatus.port must be between 1 and 65535"};
+            }
+            config.piStatus.port = static_cast<std::uint16_t>(value);
+        }
+        if (const auto* pollIntervalMs = optionalMember(*piStatus, "pollIntervalMs")) {
+            config.piStatus.pollInterval = std::chrono::milliseconds{
+                std::max(100, jsonInt(*pollIntervalMs, "piStatus.pollIntervalMs"))};
         }
     }
 
@@ -1058,6 +1098,17 @@ std::string configToJson(const RepeaterConfig& config)
         << "  \"tsGateway\": {\n"
         << "    \"address\": " << jsonString(config.tsGateway.address) << ",\n"
         << "    \"port\": " << config.tsGateway.port << "\n"
+        << "  },\n"
+        << "  \"gatewayInput\": {\n"
+        << "    \"listenAddress\": " << jsonString(config.gatewayInput.listenAddress) << ",\n"
+        << "    \"listenPort\": " << config.gatewayInput.listenPort << ",\n"
+        << "    \"packetSize\": " << config.gatewayInput.packetSize << "\n"
+        << "  },\n"
+        << "  \"piStatus\": {\n"
+        << "    \"enabled\": " << (config.piStatus.enabled ? "true" : "false") << ",\n"
+        << "    \"address\": " << jsonString(config.piStatus.address) << ",\n"
+        << "    \"port\": " << config.piStatus.port << ",\n"
+        << "    \"pollIntervalMs\": " << config.piStatus.pollInterval.count() << "\n"
         << "  },\n"
         << "  \"hardwarePtt\": {\n"
         << "    \"enabled\": " << (config.hardwarePtt.enabled ? "true" : "false") << ",\n"

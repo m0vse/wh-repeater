@@ -28,7 +28,9 @@ add_executable(wh-repeater
     src/api_server.cpp
     src/config.cpp
     src/daemon.cpp
+    src/gateway_status_client.cpp
     src/nim_controller.cpp
+    src/pc_gateway_input.cpp
     src/scan_scheduler.cpp
     src/signal_arbitrator.cpp
     src/ts_router.cpp

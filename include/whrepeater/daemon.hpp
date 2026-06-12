@@ -31,6 +31,9 @@ public:
     int run();
 
 private:
+    int runPiGatewayOrLocal();
+    int runPcGateway();
+
     RepeaterConfig config_;
     std::filesystem::path configPath_;
 };

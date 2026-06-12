@@ -53,6 +53,7 @@ public:
     void updateAnalogueStatus(AnalogueStatus status);
     void updatePlutoStatus(PlutoMqttStatus status);
     void updateTsGatewayStatus(TsGatewayStatus status);
+    void updateRemoteGatewayStatus(std::optional<std::string> statusJson);
     void updateReceiverTransitions(std::vector<ReceiverTransition> transitions);
     void updateBeaconSchedule(bool active);
     std::optional<RepeaterConfig> takePendingConfig();
@@ -72,6 +73,7 @@ private:
     std::optional<AnalogueStatus> analogueStatus_;
     std::optional<PlutoMqttStatus> plutoStatus_;
     std::optional<TsGatewayStatus> tsGatewayStatus_;
+    std::optional<std::string> remoteGatewayStatusJson_;
     std::vector<ReceiverTransition> receiverTransitions_;
     bool beaconScheduleActive_{true};
     std::optional<ActiveInput> active_;

@@ -145,6 +145,19 @@ struct TsGatewayConfig {
     std::uint16_t port{5000};
 };
 
+struct GatewayInputConfig {
+    std::string listenAddress{"0.0.0.0"};
+    std::uint16_t listenPort{5000};
+    std::size_t packetSize{1316};
+};
+
+struct PiStatusConfig {
+    bool enabled{true};
+    std::string address{"127.0.0.1"};
+    std::uint16_t port{8080};
+    std::chrono::milliseconds pollInterval{500};
+};
+
 struct ReceiverConfig {
     ReceiverId receiver;
     bool enabled{true};
@@ -165,6 +178,8 @@ struct RepeaterConfig {
     AnalogueConfig analogue;
     MediaConfig media;
     TsGatewayConfig tsGateway;
+    GatewayInputConfig gatewayInput;
+    PiStatusConfig piStatus;
     std::chrono::milliseconds statusInterval{500};
     double minimumMerDb{2.0};
     double minimumDNumberDb{0.0};

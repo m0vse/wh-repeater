@@ -61,6 +61,13 @@ const el = {
   mediaBackend: document.querySelector("#media-backend"),
   tsGatewayAddress: document.querySelector("#ts-gateway-address"),
   tsGatewayPort: document.querySelector("#ts-gateway-port"),
+  gatewayInputAddress: document.querySelector("#gateway-input-address"),
+  gatewayInputPort: document.querySelector("#gateway-input-port"),
+  gatewayInputPacketSize: document.querySelector("#gateway-input-packet-size"),
+  piStatusEnabled: document.querySelector("#pi-status-enabled"),
+  piStatusAddress: document.querySelector("#pi-status-address"),
+  piStatusPort: document.querySelector("#pi-status-port"),
+  piStatusPollInterval: document.querySelector("#pi-status-poll-interval"),
   outputWidth: document.querySelector("#output-width"),
   outputHeight: document.querySelector("#output-height"),
   outputFrameRate: document.querySelector("#output-frame-rate"),
@@ -435,6 +442,13 @@ function fillConfigForm() {
   el.mediaBackend.value = config.media?.backend ?? "ffmpeg";
   el.tsGatewayAddress.value = config.tsGateway?.address ?? "127.0.0.1";
   el.tsGatewayPort.value = config.tsGateway?.port ?? 5000;
+  el.gatewayInputAddress.value = config.gatewayInput?.listenAddress ?? "0.0.0.0";
+  el.gatewayInputPort.value = config.gatewayInput?.listenPort ?? 5000;
+  el.gatewayInputPacketSize.value = config.gatewayInput?.packetSize ?? 1316;
+  el.piStatusEnabled.checked = config.piStatus?.enabled ?? true;
+  el.piStatusAddress.value = config.piStatus?.address ?? "127.0.0.1";
+  el.piStatusPort.value = config.piStatus?.port ?? 8080;
+  el.piStatusPollInterval.value = config.piStatus?.pollIntervalMs ?? 500;
   el.outputWidth.value = config.pluto?.outputWidth ?? 1280;
   el.outputHeight.value = config.pluto?.outputHeight ?? 720;
   el.outputFrameRate.value = config.pluto?.outputFrameRate ?? 25;
@@ -640,6 +654,17 @@ function readConfigForm() {
     tsGateway: {
       address: el.tsGatewayAddress.value || "127.0.0.1",
       port: numberValue(el.tsGatewayPort, 5000),
+    },
+    gatewayInput: {
+      listenAddress: el.gatewayInputAddress.value || "0.0.0.0",
+      listenPort: numberValue(el.gatewayInputPort, 5000),
+      packetSize: numberValue(el.gatewayInputPacketSize, 1316),
+    },
+    piStatus: {
+      enabled: el.piStatusEnabled.checked,
+      address: el.piStatusAddress.value || "127.0.0.1",
+      port: numberValue(el.piStatusPort, 8080),
+      pollIntervalMs: numberValue(el.piStatusPollInterval, 500),
     },
     hardwarePtt: {
       enabled: el.hardwarePttEnabled.checked,
@@ -977,6 +1002,13 @@ for (const input of [
   el.mediaBackend,
   el.tsGatewayAddress,
   el.tsGatewayPort,
+  el.gatewayInputAddress,
+  el.gatewayInputPort,
+  el.gatewayInputPacketSize,
+  el.piStatusEnabled,
+  el.piStatusAddress,
+  el.piStatusPort,
+  el.piStatusPollInterval,
   el.outputWidth,
   el.outputHeight,
   el.outputFrameRate,

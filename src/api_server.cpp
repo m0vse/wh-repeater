@@ -191,6 +191,83 @@ std::uint64_t updatedMsAgo(const ReceiverStatus& status)
     return updatedMsAgo(status.updatedAt);
 }
 
+std::optional<std::string_view> jsonMember(std::string_view object, std::string_view name)
+{
+    const auto key = "\"" + std::string{name} + "\"";
+    const auto keyPos = object.find(key);
+    if (keyPos == std::string_view::npos) {
+        return std::nullopt;
+    }
+    auto pos = object.find(':', keyPos + key.size());
+    if (pos == std::string_view::npos) {
+        return std::nullopt;
+    }
+    ++pos;
+    while (pos < object.size() && std::isspace(static_cast<unsigned char>(object[pos]))) {
+        ++pos;
+    }
+    if (pos >= object.size()) {
+        return std::nullopt;
+    }
+
+    const auto start = pos;
+    const auto opening = object[pos];
+    if (opening == '{' || opening == '[') {
+        const auto closing = opening == '{' ? '}' : ']';
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+        for (; pos < object.size(); ++pos) {
+            const auto ch = object[pos];
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (ch == '\\') {
+                    escaped = true;
+                } else if (ch == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (ch == '"') {
+                inString = true;
+            } else if (ch == opening) {
+                ++depth;
+            } else if (ch == closing) {
+                --depth;
+                if (depth == 0) {
+                    return object.substr(start, pos - start + 1);
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+    if (opening == '"') {
+        bool escaped = false;
+        for (++pos; pos < object.size(); ++pos) {
+            const auto ch = object[pos];
+            if (escaped) {
+                escaped = false;
+            } else if (ch == '\\') {
+                escaped = true;
+            } else if (ch == '"') {
+                return object.substr(start, pos - start + 1);
+            }
+        }
+        return std::nullopt;
+    }
+
+    while (pos < object.size() && object[pos] != ',' && object[pos] != '}') {
+        ++pos;
+    }
+    auto end = pos;
+    while (end > start && std::isspace(static_cast<unsigned char>(object[end - 1]))) {
+        --end;
+    }
+    return object.substr(start, end - start);
+}
+
 void writeResponse(int clientFd, std::string_view status, std::string_view contentType, std::string_view body)
 {
     std::ostringstream response;
@@ -446,6 +523,12 @@ void ApiServer::updateTsGatewayStatus(TsGatewayStatus status)
 {
     std::lock_guard lock{snapshotMutex_};
     tsGatewayStatus_ = std::move(status);
+}
+
+void ApiServer::updateRemoteGatewayStatus(std::optional<std::string> statusJson)
+{
+    std::lock_guard lock{snapshotMutex_};
+    remoteGatewayStatusJson_ = std::move(statusJson);
 }
 
 void ApiServer::updateReceiverTransitions(std::vector<ReceiverTransition> transitions)
@@ -712,6 +795,7 @@ std::string ApiServer::statusJson() const
     std::optional<AnalogueStatus> analogue;
     std::optional<PlutoMqttStatus> pluto;
     std::optional<TsGatewayStatus> tsGateway;
+    std::optional<std::string> remoteGatewayStatus;
     std::vector<ReceiverTransition> transitions;
     bool beaconScheduleActive{};
     RepeaterConfig config;
@@ -722,81 +806,115 @@ std::string ApiServer::statusJson() const
         analogue = analogueStatus_;
         pluto = plutoStatus_;
         tsGateway = tsGatewayStatus_;
+        remoteGatewayStatus = remoteGatewayStatusJson_;
         transitions = receiverTransitions_;
         beaconScheduleActive = beaconScheduleActive_;
         config = repeaterConfig_;
     }
 
+    const std::string_view remoteStatus = remoteGatewayStatus.has_value()
+        ? std::string_view{*remoteGatewayStatus}
+        : std::string_view{};
+    const auto remoteActive = config.mode == "pc-gateway" && !remoteStatus.empty()
+        ? jsonMember(remoteStatus, "activeReceiver")
+        : std::optional<std::string_view>{};
+    const auto remoteReceivers = config.mode == "pc-gateway" && !remoteStatus.empty()
+        ? jsonMember(remoteStatus, "receivers")
+        : std::optional<std::string_view>{};
+    const auto remoteTransitions = config.mode == "pc-gateway" && !remoteStatus.empty()
+        ? jsonMember(remoteStatus, "receiverTransitions")
+        : std::optional<std::string_view>{};
+
     std::ostringstream out;
     out << "{";
     out << "\"mode\":" << jsonString(config.mode) << ",";
-    if (active.has_value()) {
+    if (remoteActive.has_value()) {
+        out << "\"activeReceiver\":" << *remoteActive;
+    } else if (active.has_value()) {
         out << "\"activeReceiver\":" << active->receiver.value;
     } else {
         out << "\"activeReceiver\":null";
     }
-    out << ",\"receivers\":[";
+    out << ",\"receivers\":";
 
-    bool wroteReceiver = false;
-    for (std::size_t index = 0; index < statuses.size(); ++index) {
-        const auto& status = statuses[index];
-        if (wroteReceiver) {
-            out << ",";
+    if (remoteReceivers.has_value()) {
+        out << *remoteReceivers;
+    } else {
+        out << "[";
+
+        bool wroteReceiver = false;
+        for (std::size_t index = 0; index < statuses.size(); ++index) {
+            const auto& status = statuses[index];
+            if (wroteReceiver) {
+                out << ",";
+            }
+            wroteReceiver = true;
+            out << "{"
+                << "\"id\":" << status.receiver.value << ","
+                << "\"name\":" << jsonString(config.mode == "pc-gateway"
+                    ? "Pi UDP gateway"
+                    : "RX" + std::to_string(status.receiver.value)) << ","
+                << "\"type\":" << jsonString(config.mode == "pc-gateway" ? "gateway" : "nim") << ","
+                << "\"deviceId\":" << jsonString(config.mode == "pc-gateway"
+                    ? "udp-gateway"
+                    : "nim" + std::to_string(status.receiver.value)) << ",";
+            if (config.mode == "pc-gateway") {
+                out << "\"nim\":null,"
+                    << "\"tuner\":null,"
+                    << "\"antenna\":null,";
+            } else {
+                out << "\"nim\":" << jsonString(receiverNimName(status.receiver)) << ","
+                    << "\"tuner\":" << receiverTunerNumber(status.receiver) << ","
+                    << "\"antenna\":" << jsonString(receiverAntennaName(status.receiver)) << ",";
+            }
+            out
+                << "\"state\":" << jsonString(receiverStateName(status.state)) << ","
+                << "\"target\":" << optionalTargetJson(status.target) << ","
+                << "\"merDb\":" << optionalDoubleJson(status.merDb) << ","
+                << "\"dNumberDb\":" << optionalDoubleJson(status.dNumberDb) << ","
+                << "\"serviceName\":" << (status.serviceName.has_value() ? jsonString(*status.serviceName) : "null") << ","
+                << "\"modulation\":" << (status.modulation.has_value() ? jsonString(*status.modulation) : "null") << ","
+                << "\"transportPackets\":" << status.transportPackets << ","
+                << "\"continuityErrors\":" << status.continuityErrors << ","
+                << "\"updatedMsAgo\":" << updatedMsAgo(status)
+                << "}";
         }
-        wroteReceiver = true;
-        out << "{"
-            << "\"id\":" << status.receiver.value << ","
-            << "\"name\":" << jsonString("RX" + std::to_string(status.receiver.value)) << ","
-            << "\"type\":\"nim\","
-            << "\"deviceId\":" << jsonString("nim" + std::to_string(status.receiver.value)) << ","
-            << "\"nim\":" << jsonString(receiverNimName(status.receiver)) << ","
-            << "\"tuner\":" << receiverTunerNumber(status.receiver) << ","
-            << "\"antenna\":" << jsonString(receiverAntennaName(status.receiver)) << ","
-            << "\"state\":" << jsonString(receiverStateName(status.state)) << ","
-            << "\"target\":" << optionalTargetJson(status.target) << ","
-            << "\"merDb\":" << optionalDoubleJson(status.merDb) << ","
-            << "\"dNumberDb\":" << optionalDoubleJson(status.dNumberDb) << ","
-            << "\"serviceName\":" << (status.serviceName.has_value() ? jsonString(*status.serviceName) : "null") << ","
-            << "\"modulation\":" << (status.modulation.has_value() ? jsonString(*status.modulation) : "null") << ","
-            << "\"transportPackets\":" << status.transportPackets << ","
-            << "\"continuityErrors\":" << status.continuityErrors << ","
-            << "\"updatedMsAgo\":" << updatedMsAgo(status)
-            << "}";
+
+        if (analogue.has_value() && analogue->enabled) {
+            if (wroteReceiver) {
+                out << ",";
+            }
+            const auto state = !analogue->present ? "fault" : analogue->locked ? "lockedAnalogue" : analogue->ready ? "idle" : "fault";
+            out << "{"
+                << "\"id\":" << config.analogue.capture.receiver.value << ","
+                << "\"name\":" << jsonString(config.analogue.capture.label.empty() ? "Analogue" : config.analogue.capture.label) << ","
+                << "\"type\":\"analogue\","
+                << "\"deviceId\":" << jsonString(config.analogue.capture.deviceId) << ","
+                << "\"state\":" << jsonString(state) << ","
+                << "\"target\":null,"
+                << "\"merDb\":null,"
+                << "\"dNumberDb\":null,"
+                << "\"serviceName\":" << jsonString(config.analogue.capture.label.empty() ? "Analogue" : config.analogue.capture.label) << ","
+                << "\"modulation\":\"SD analogue\","
+                << "\"transportPackets\":0,"
+                << "\"continuityErrors\":0,"
+                << "\"updatedMsAgo\":" << updatedMsAgo(analogue->updatedAt) << ","
+                << "\"present\":" << (analogue->present ? "true" : "false") << ","
+                << "\"detected\":" << (analogue->present ? "true" : "false") << ","
+                << "\"ready\":" << (analogue->ready ? "true" : "false") << ","
+                << "\"locked\":" << (analogue->locked ? "true" : "false") << ","
+                << "\"rawLock\":" << static_cast<int>(analogue->rawLock) << ","
+                << "\"cameraRunning\":" << (analogue->cameraRunning ? "true" : "false") << ","
+                << "\"source\":" << jsonString(analogue->activeSource.empty() ? analogue->selectedSource : analogue->activeSource) << ","
+                << "\"firmwareVersion\":" << jsonString(analogue->firmwareVersion) << ","
+                << "\"hardwareId\":" << jsonString(analogue->hardwareId) << ","
+                << "\"error\":" << (analogue->error.has_value() ? jsonString(*analogue->error) : "null")
+                << "}";
+        }
+        out << "]";
     }
 
-    if (analogue.has_value() && analogue->enabled) {
-        if (wroteReceiver) {
-            out << ",";
-        }
-        const auto state = !analogue->present ? "fault" : analogue->locked ? "lockedAnalogue" : analogue->ready ? "idle" : "fault";
-        out << "{"
-            << "\"id\":" << config.analogue.capture.receiver.value << ","
-            << "\"name\":" << jsonString(config.analogue.capture.label.empty() ? "Analogue" : config.analogue.capture.label) << ","
-            << "\"type\":\"analogue\","
-            << "\"deviceId\":" << jsonString(config.analogue.capture.deviceId) << ","
-            << "\"state\":" << jsonString(state) << ","
-            << "\"target\":null,"
-            << "\"merDb\":null,"
-            << "\"dNumberDb\":null,"
-            << "\"serviceName\":" << jsonString(config.analogue.capture.label.empty() ? "Analogue" : config.analogue.capture.label) << ","
-            << "\"modulation\":\"SD analogue\","
-            << "\"transportPackets\":0,"
-            << "\"continuityErrors\":0,"
-            << "\"updatedMsAgo\":" << updatedMsAgo(analogue->updatedAt) << ","
-            << "\"present\":" << (analogue->present ? "true" : "false") << ","
-            << "\"detected\":" << (analogue->present ? "true" : "false") << ","
-            << "\"ready\":" << (analogue->ready ? "true" : "false") << ","
-            << "\"locked\":" << (analogue->locked ? "true" : "false") << ","
-            << "\"rawLock\":" << static_cast<int>(analogue->rawLock) << ","
-            << "\"cameraRunning\":" << (analogue->cameraRunning ? "true" : "false") << ","
-            << "\"source\":" << jsonString(analogue->activeSource.empty() ? analogue->selectedSource : analogue->activeSource) << ","
-            << "\"firmwareVersion\":" << jsonString(analogue->firmwareVersion) << ","
-            << "\"hardwareId\":" << jsonString(analogue->hardwareId) << ","
-            << "\"error\":" << (analogue->error.has_value() ? jsonString(*analogue->error) : "null")
-            << "}";
-    }
-
-    out << "],\"tsGateway\":";
+    out << ",\"tsGateway\":";
     if (tsGateway.has_value()) {
         out << "{"
             << "\"enabled\":" << (tsGateway->enabled ? "true" : "false") << ","
@@ -830,26 +948,31 @@ std::string ApiServer::statusJson() const
             << "}";
     }
 
-    out << ",\"receiverTransitions\":[";
-    for (std::size_t index = 0; index < transitions.size(); ++index) {
-        if (index != 0) {
-            out << ",";
+    out << ",\"receiverTransitions\":";
+    if (remoteTransitions.has_value()) {
+        out << *remoteTransitions;
+    } else {
+        out << "[";
+        for (std::size_t index = 0; index < transitions.size(); ++index) {
+            if (index != 0) {
+                out << ",";
+            }
+            const auto& transition = transitions[index];
+            out << "{"
+                << "\"receiver\":";
+            if (transition.receiver.has_value()) {
+                out << transition.receiver->value;
+            } else {
+                out << "null";
+            }
+            out << ",\"from\":" << jsonString(transition.from)
+                << ",\"to\":" << jsonString(transition.to)
+                << ",\"detail\":" << jsonString(transition.detail)
+                << ",\"updatedMsAgo\":" << updatedMsAgo(transition.updatedAt)
+                << "}";
         }
-        const auto& transition = transitions[index];
-        out << "{"
-            << "\"receiver\":";
-        if (transition.receiver.has_value()) {
-            out << transition.receiver->value;
-        } else {
-            out << "null";
-        }
-        out << ",\"from\":" << jsonString(transition.from)
-            << ",\"to\":" << jsonString(transition.to)
-            << ",\"detail\":" << jsonString(transition.detail)
-            << ",\"updatedMsAgo\":" << updatedMsAgo(transition.updatedAt)
-            << "}";
+        out << "]";
     }
-    out << "]";
 
     out << ",\"analogue\":";
     if (analogue.has_value()) {
