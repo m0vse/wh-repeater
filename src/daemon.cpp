@@ -27,6 +27,7 @@
 #include "whrepeater/scan_scheduler.hpp"
 #include "whrepeater/sd1_controller.hpp"
 #include "whrepeater/signal_arbitrator.hpp"
+#include "whrepeater/ts_gateway_sink.hpp"
 #include "whrepeater/ts_router.hpp"
 
 #include <chrono>
@@ -36,11 +37,13 @@
 #include <ctime>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
 #include <filesystem>
 #include <iostream>
 #include <linux/gpio.h>
 #include <linux/videodev2.h>
+#include <map>
 #include <memory>
 #include <optional>
 #include <cstdio>
@@ -246,6 +249,66 @@ std::optional<ActiveInput> analogueActiveInput(const RepeaterConfig& config, con
     };
 }
 
+std::string receiverStateName(ReceiverState state)
+{
+    switch (state) {
+    case ReceiverState::idle:
+        return "idle";
+    case ReceiverState::searching:
+        return "searching";
+    case ReceiverState::foundHeader:
+        return "foundHeader";
+    case ReceiverState::lockedDvbs:
+        return "lockedDvbs";
+    case ReceiverState::lockedDvbs2:
+        return "lockedDvbs2";
+    case ReceiverState::lost:
+        return "lost";
+    case ReceiverState::timeout:
+        return "timeout";
+    case ReceiverState::fault:
+        return "fault";
+    }
+    return "unknown";
+}
+
+std::string activeInputDetail(const std::optional<ActiveInput>& active)
+{
+    if (!active.has_value()) {
+        return "none";
+    }
+    if (!active->status.serviceName.value_or("").empty()) {
+        return active->status.serviceName.value();
+    }
+    if (!active->target.label.empty()) {
+        return active->target.label;
+    }
+    return std::to_string(active->target.frequencyKhz) + " kHz SR" + std::to_string(active->target.symbolRateKs);
+}
+
+void appendTransition(std::deque<ReceiverTransition>& transitions,
+                      std::optional<ReceiverId> receiver,
+                      std::string from,
+                      std::string to,
+                      std::string detail)
+{
+    transitions.push_front(ReceiverTransition{
+        .receiver = receiver,
+        .from = std::move(from),
+        .to = std::move(to),
+        .detail = std::move(detail),
+        .updatedAt = std::chrono::steady_clock::now(),
+    });
+    while (transitions.size() > 32) {
+        transitions.pop_back();
+    }
+}
+
+std::vector<ReceiverTransition> transitionSnapshot(const std::deque<ReceiverTransition>& transitions)
+{
+    return {transitions.begin(), transitions.end()};
+}
+
 AnalogueStatus captureAnalogueStatus(const RepeaterConfig& config)
 {
     AnalogueStatus status;
@@ -331,8 +394,16 @@ int Daemon::run()
     ScanScheduler scanner{config_.receivers};
     SignalArbitrator arbitrator{config_};
     TsRouter router;
-    auto media = std::make_unique<MediaProcess>(config_);
-    auto plutoStatus = std::make_unique<PlutoMqttStatusWorker>(config_.pluto);
+    const auto gatewayMode = config_.mode == "ts-gateway";
+    std::unique_ptr<MediaProcess> media;
+    std::unique_ptr<TsGatewaySink> gateway;
+    std::unique_ptr<PlutoMqttStatusWorker> plutoStatus;
+    if (gatewayMode) {
+        gateway = std::make_unique<TsGatewaySink>(config_.tsGateway);
+    } else {
+        media = std::make_unique<MediaProcess>(config_);
+        plutoStatus = std::make_unique<PlutoMqttStatusWorker>(config_.pluto);
+    }
     std::unique_ptr<Sd1StatusWorker> sd1;
     if (kSd1SupportEnabled && config_.analogue.sd1.enabled) {
         sd1 = std::make_unique<Sd1StatusWorker>(config_.analogue.sd1);
@@ -345,12 +416,21 @@ int Daemon::run()
     std::optional<std::chrono::steady_clock::time_point> analogueLockedSince;
     std::optional<ActiveInput> heldAnalogueActive;
     std::chrono::steady_clock::time_point heldAnalogueUntil{};
+    std::map<int, ReceiverState> previousReceiverStates;
+    std::optional<ReceiverId> previousActiveReceiver;
+    std::deque<ReceiverTransition> receiverTransitions;
 
     nim->initialise();
     api.updateConfig(config_);
+    if (gateway) {
+        api.updateTsGatewayStatus(gateway->status());
+    }
     api.start();
 
     std::cout << "wh-repeater daemon starting with " << config_.receivers.size() << " receivers\n";
+    if (gatewayMode) {
+        std::cout << "TS gateway mode forwarding to " << config_.tsGateway.address << ':' << config_.tsGateway.port << '\n';
+    }
     std::cout << "API listening on http://127.0.0.1:8080/api/status\n";
 
     while (!shutdownRequested.load()) {
@@ -375,17 +455,21 @@ int Daemon::run()
 
         if (auto fallbackVideo = api.takePendingFallbackVideo(); fallbackVideo.has_value()) {
             auto path = std::move(*fallbackVideo);
-            if (path.empty() && !config_.fallback.videoPaths.empty()) {
-                path = config_.fallback.videoPaths.front();
-            }
-            if (path.empty()) {
-                std::cerr << "wh-repeater: fallback video play requested but no fallback video path is configured\n";
+            if (media) {
+                if (path.empty() && !config_.fallback.videoPaths.empty()) {
+                    path = config_.fallback.videoPaths.front();
+                }
+                if (path.empty()) {
+                    std::cerr << "wh-repeater: fallback video play requested but no fallback video path is configured\n";
+                } else {
+                    media->playFallbackVideo(std::move(path));
+                }
             } else {
-                media->playFallbackVideo(std::move(path));
+                std::cerr << "wh-repeater: fallback video play ignored in TS gateway mode: " << path << '\n';
             }
         }
 
-        if (api.takePendingFallbackVideoStop()) {
+        if (api.takePendingFallbackVideoStop() && media) {
             media->stopFallbackVideo();
         }
 
@@ -411,9 +495,11 @@ int Daemon::run()
             analogueLockedSince.reset();
         }
         api.updateAnalogueStatus(gatedAnalogueStatus);
-        api.updatePlutoStatus(plutoStatus->snapshot());
+        if (plutoStatus) {
+            api.updatePlutoStatus(plutoStatus->snapshot());
+        }
         auto active = arbitrator.choose(statuses);
-        if (!active.has_value()) {
+        if (!gatewayMode && !active.has_value()) {
             if (auto analogueActive = analogueActiveInput(config_, gatedAnalogueStatus); analogueActive.has_value()) {
                 active = analogueActive;
                 heldAnalogueActive = analogueActive;
@@ -427,7 +513,38 @@ int Daemon::run()
             && active->receiver != config_.analogue.sd1.receiver) {
             heldAnalogueActive.reset();
         }
+
+        for (const auto& status : statuses) {
+            const auto previous = previousReceiverStates.find(status.receiver.value);
+            if (previous == previousReceiverStates.end()) {
+                previousReceiverStates[status.receiver.value] = status.state;
+            } else if (previous->second != status.state) {
+                appendTransition(receiverTransitions,
+                                 status.receiver,
+                                 receiverStateName(previous->second),
+                                 receiverStateName(status.state),
+                                 status.target.has_value() ? status.target->label : "");
+                previous->second = status.state;
+            }
+        }
+        const auto currentActiveReceiver = active.has_value()
+            ? std::optional<ReceiverId>{active->receiver}
+            : std::nullopt;
+        if (currentActiveReceiver != previousActiveReceiver) {
+            appendTransition(receiverTransitions,
+                             currentActiveReceiver,
+                             previousActiveReceiver.has_value()
+                                 ? "active RX" + std::to_string(previousActiveReceiver->value)
+                                 : "none",
+                             currentActiveReceiver.has_value()
+                                 ? "active RX" + std::to_string(currentActiveReceiver->value)
+                                 : "none",
+                             activeInputDetail(active));
+            previousActiveReceiver = currentActiveReceiver;
+        }
+
         api.updateStatus(statuses, active);
+        api.updateReceiverTransitions(transitionSnapshot(receiverTransitions));
 
         if (active.has_value()) {
             accessNotice = accessMessage(config_);
@@ -443,27 +560,38 @@ int Daemon::run()
         }
 
         ident.update(active, now);
-        media->select(active);
-        media->setBeaconAllowed(beaconAllowed);
-        media->setAccessNotice(accessNotice);
-        const auto mediaForcedTransmit = media->mode() == MediaPipelineMode::fallbackVideo;
-        hardwarePtt.setTransmitEnabled(mediaForcedTransmit
-            || active.has_value()
-            || (config_.fallback.enabled && (beaconAllowed || accessNotice.has_value())));
+        bool mediaForcedTransmit = false;
+        if (media) {
+            media->select(active);
+            media->setBeaconAllowed(beaconAllowed);
+            media->setAccessNotice(accessNotice);
+            mediaForcedTransmit = media->mode() == MediaPipelineMode::fallbackVideo;
+        }
+        hardwarePtt.setTransmitEnabled(!gatewayMode
+            && (mediaForcedTransmit
+                || active.has_value()
+                || (config_.fallback.enabled && (beaconAllowed || accessNotice.has_value()))));
         const auto activeForRouter = active.has_value()
                 && active->receiver != config_.analogue.sd1.receiver
                 && active->receiver != config_.analogue.capture.receiver
             ? active
             : std::nullopt;
         router.select(activeForRouter);
-        router.pump(*nim, *media);
-        media->tick(now);
+        if (gateway) {
+            gateway->setActive(activeForRouter);
+            router.pump(*nim, *gateway);
+            api.updateTsGatewayStatus(gateway->status());
+        } else if (media) {
+            router.pump(*nim, *media);
+            media->tick(now);
+        }
 
         std::this_thread::sleep_for(config_.statusInterval);
     }
 
     std::cout << "wh-repeater daemon shutting down\n";
     media.reset();
+    gateway.reset();
     hardwarePtt.setTransmitEnabled(false);
     plutoStatus.reset();
     sd1.reset();

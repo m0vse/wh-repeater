@@ -43,26 +43,24 @@ the media pipeline into analogue capture mode.
   status worker from starting even if config is changed.
 - The web SD1 configuration section is hidden, but the HTML controls are still
   present for easy restoration.
-- `WH_REPEATER_BUILD_SD1_TOOLS` defaults to `OFF`; enabling it builds
-  `sd1-activation-diag`.
 
 ## Parked Files
 
 - `src/sd1_controller.cpp` and `include/whrepeater/sd1_controller.hpp`: PiVideo
   register polling.
-- `kernel/wh_sd1_sensor/wh_sd1_sensor.c`: minimal V4L2 sensor shim.
-- `overlays/wh-sd1-csi0-i2c10-overlay.dts`: shim on the observed CSI0/I2C10
-  route.
-- `overlays/wh-ov5647-i2c10-csi0-overlay.dts`: stock OV5647 test route.
-- `tools/sd1_activation_diag.cpp`: optional polling/capture diagnostic.
+
+The experimental local kernel module, device-tree overlays, and one-off
+activation diagnostic have been removed from the active tree. They were test
+artifacts rather than confirmed SD1 support. Recreate those pieces from the
+findings below only if the CSI format is confirmed and SD1 work resumes.
 
 ## Restore Checklist
 
 1. Confirm the SD1 CSI-2 output data type, resolution, frame rate, lane count,
    clock mode, and link frequency.
-2. Update `kernel/wh_sd1_sensor/wh_sd1_sensor.c` and
-   `overlays/wh-sd1-csi0-i2c10-overlay.dts` to match that mode.
-3. Install the overlay and module, then enable their boot-time loading.
+2. Create a minimal sensor driver or overlay that matches the confirmed mode.
+3. Install the overlay/module if that route is still selected, then enable their
+   boot-time loading.
 4. Set `kSd1SupportEnabled = true` in `src/daemon.cpp`.
 5. Remove `hidden` from the SD1 section in `web/index.html`.
 6. Set `analogue.sd1.enabled` true in the live config only after direct V4L2

@@ -52,6 +52,8 @@ public:
     void updateStatus(std::vector<ReceiverStatus> statuses, std::optional<ActiveInput> active);
     void updateAnalogueStatus(AnalogueStatus status);
     void updatePlutoStatus(PlutoMqttStatus status);
+    void updateTsGatewayStatus(TsGatewayStatus status);
+    void updateReceiverTransitions(std::vector<ReceiverTransition> transitions);
     void updateBeaconSchedule(bool active);
     std::optional<RepeaterConfig> takePendingConfig();
     std::optional<std::string> takePendingFallbackVideo();
@@ -69,6 +71,8 @@ private:
     std::vector<ReceiverStatus> statuses_;
     std::optional<AnalogueStatus> analogueStatus_;
     std::optional<PlutoMqttStatus> plutoStatus_;
+    std::optional<TsGatewayStatus> tsGatewayStatus_;
+    std::vector<ReceiverTransition> receiverTransitions_;
     bool beaconScheduleActive_{true};
     std::optional<ActiveInput> active_;
     std::optional<RepeaterConfig> pendingConfig_;

@@ -50,6 +50,13 @@
           <h3>Signal Selection</h3>
           <div class="form-grid compact">
             <label>
+              Operating mode
+              <select id="operating-mode">
+                <option value="local-transcode">Local transcode</option>
+                <option value="ts-gateway">TS gateway</option>
+              </select>
+            </label>
+            <label>
               Status interval ms
               <input id="status-interval" type="number" min="100" step="100">
             </label>
@@ -245,6 +252,20 @@
                 <label class="wide">
                   Watermark text
                   <input id="watermark-text" type="text">
+                </label>
+              </div>
+            </div>
+
+            <div class="config-subsection">
+              <h4>TS Gateway</h4>
+              <div class="form-grid compact">
+                <label>
+                  PC destination address
+                  <input id="ts-gateway-address" type="text" placeholder="192.168.1.100">
+                </label>
+                <label>
+                  PC destination UDP port
+                  <input id="ts-gateway-port" type="number" min="1" max="65535">
                 </label>
               </div>
             </div>

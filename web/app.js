@@ -34,6 +34,7 @@ const el = {
   save: document.querySelector("#save"),
   serviceRestart: document.querySelector("#service-restart"),
   addReceiver: document.querySelector("#add-receiver"),
+  operatingMode: document.querySelector("#operating-mode"),
   statusInterval: document.querySelector("#status-interval"),
   minimumMer: document.querySelector("#minimum-mer"),
   minimumDNumber: document.querySelector("#minimum-dnumber"),
@@ -58,6 +59,8 @@ const el = {
   videoBitrate: document.querySelector("#video-bitrate"),
   audioBitrate: document.querySelector("#audio-bitrate"),
   mediaBackend: document.querySelector("#media-backend"),
+  tsGatewayAddress: document.querySelector("#ts-gateway-address"),
+  tsGatewayPort: document.querySelector("#ts-gateway-port"),
   outputWidth: document.querySelector("#output-width"),
   outputHeight: document.querySelector("#output-height"),
   outputFrameRate: document.querySelector("#output-frame-rate"),
@@ -346,15 +349,19 @@ function updateCalculatedMediaRates() {
 
 function renderTxStatus() {
   const pluto = state.status?.pluto;
+  const gateway = state.status?.tsGateway;
+  const gatewayMode = state.status?.mode === "ts-gateway" || state.config?.mode === "ts-gateway";
   el.txStatusPanel.innerHTML = "";
 
   const head = document.createElement("div");
   head.className = "panel-head";
   const title = document.createElement("h2");
-  title.textContent = "TX Status";
+  title.textContent = gatewayMode ? "TS Gateway Status" : "TX Status";
   const badge = document.createElement("span");
-  badge.className = `badge ${pluto?.connected ? "locked" : ""}`;
-  badge.textContent = pluto?.connected ? "connected" : "disconnected";
+  badge.className = `badge ${(gatewayMode ? gateway?.enabled : pluto?.connected) ? "locked" : ""}`;
+  badge.textContent = gatewayMode
+    ? (gateway?.enabled ? "enabled" : "disabled")
+    : (pluto?.connected ? "connected" : "disconnected");
   head.appendChild(title);
   head.appendChild(badge);
   el.txStatusPanel.appendChild(head);
@@ -362,6 +369,18 @@ function renderTxStatus() {
   const values = pluto?.values || {};
   const list = document.createElement("dl");
   list.className = "tx-status-grid";
+  if (gatewayMode) {
+    appendStatusRow(list, "Destination", gateway ? `${gateway.address || "-"}:${gateway.port || "-"}` : null);
+    appendStatusRow(list, "Selected RX", gateway?.activeReceiver ? `RX${gateway.activeReceiver}` : "-");
+    appendStatusRow(list, "TS packets", gateway?.transportPackets ?? 0);
+    appendStatusRow(list, "UDP datagrams", gateway?.datagrams ?? 0);
+    appendStatusRow(list, "Bytes sent", gateway?.bytes ?? 0);
+    appendStatusRow(list, "Send errors", gateway?.sendErrors ?? 0);
+    appendStatusRow(list, "Updated", gateway ? `${gateway.updatedMsAgo ?? 0} ms ago` : null);
+    appendStatusRow(list, "Error", gateway?.lastError);
+    el.txStatusPanel.appendChild(list);
+    return;
+  }
   appendStatusRow(list, "MQTT", pluto?.enabled === false ? "disabled" : `${pluto?.host || "-"}:${pluto?.port || "-"}`);
   appendStatusRow(list, "Protocol", pluto?.protocol || "-");
   appendStatusRow(list, "Device ID", pluto?.deviceId || "-");
@@ -389,6 +408,7 @@ function fillConfigForm() {
     return;
   }
 
+  el.operatingMode.value = config.mode ?? "local-transcode";
   el.statusInterval.value = config.statusIntervalMs ?? 500;
   el.minimumMer.value = config.selection?.minimumMerDb ?? 2;
   el.minimumDNumber.value = config.selection?.minimumDNumberDb ?? 0;
@@ -413,6 +433,8 @@ function fillConfigForm() {
   el.videoBitrate.value = config.pluto?.videoBitrateKbps ?? 900;
   el.audioBitrate.value = config.pluto?.audioBitrateKbps ?? 96;
   el.mediaBackend.value = config.media?.backend ?? "ffmpeg";
+  el.tsGatewayAddress.value = config.tsGateway?.address ?? "127.0.0.1";
+  el.tsGatewayPort.value = config.tsGateway?.port ?? 5000;
   el.outputWidth.value = config.pluto?.outputWidth ?? 1280;
   el.outputHeight.value = config.pluto?.outputHeight ?? 720;
   el.outputFrameRate.value = config.pluto?.outputFrameRate ?? 25;
@@ -560,6 +582,7 @@ function readConfigForm() {
   }));
 
   return {
+    mode: el.operatingMode.value || "local-transcode",
     statusIntervalMs: numberValue(el.statusInterval, 500),
     selection: {
       minimumMerDb: numberValue(el.minimumMer, 2),
@@ -613,6 +636,10 @@ function readConfigForm() {
     },
     media: {
       backend: el.mediaBackend.value || "ffmpeg",
+    },
+    tsGateway: {
+      address: el.tsGatewayAddress.value || "127.0.0.1",
+      port: numberValue(el.tsGatewayPort, 5000),
     },
     hardwarePtt: {
       enabled: el.hardwarePttEnabled.checked,
@@ -925,6 +952,7 @@ if (el.addReceiver) {
 }
 
 for (const input of [
+  el.operatingMode,
   el.statusInterval,
   el.minimumMer,
   el.minimumDNumber,
@@ -947,6 +975,8 @@ for (const input of [
   el.plutoConstellation,
   el.audioBitrate,
   el.mediaBackend,
+  el.tsGatewayAddress,
+  el.tsGatewayPort,
   el.outputWidth,
   el.outputHeight,
   el.outputFrameRate,

@@ -1,4 +1,5 @@
 {
+  "mode": "local-transcode",
   "statusIntervalMs": 500,
   "selection": {
     "minimumMerDb": 2,
@@ -51,6 +52,10 @@
   },
   "media": {
     "backend": "ffmpeg"
+  },
+  "tsGateway": {
+    "address": "127.0.0.1",
+    "port": 5000
   },
   "hardwarePtt": {
     "enabled": false,

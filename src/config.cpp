@@ -625,6 +625,12 @@ RepeaterConfig configFromJson(std::string_view text)
     if (const auto* statusIntervalMs = optionalMember(root, "statusIntervalMs")) {
         config.statusInterval = std::chrono::milliseconds{jsonInt(*statusIntervalMs, "statusIntervalMs")};
     }
+    if (const auto* mode = optionalMember(root, "mode")) {
+        config.mode = jsonText(*mode, "mode");
+        if (config.mode != "local-transcode" && config.mode != "ts-gateway") {
+            throw std::runtime_error{"mode must be local-transcode or ts-gateway"};
+        }
+    }
 
     if (const auto* selection = optionalMember(root, "selection")) {
         if (const auto* mer = optionalMember(*selection, "minimumMerDb")) {
@@ -782,6 +788,19 @@ RepeaterConfig configFromJson(std::string_view text)
             if (config.media.backend != "ffmpeg" && config.media.backend != "gstreamer") {
                 throw std::runtime_error{"media.backend must be ffmpeg or gstreamer"};
             }
+        }
+    }
+
+    if (const auto* tsGateway = optionalMember(root, "tsGateway")) {
+        if (const auto* address = optionalMember(*tsGateway, "address")) {
+            config.tsGateway.address = jsonText(*address, "tsGateway.address");
+        }
+        if (const auto* port = optionalMember(*tsGateway, "port")) {
+            const auto value = jsonUint32(*port, "tsGateway.port");
+            if (value == 0 || value > 65535) {
+                throw std::runtime_error{"tsGateway.port must be between 1 and 65535"};
+            }
+            config.tsGateway.port = static_cast<std::uint16_t>(value);
         }
     }
 
@@ -974,6 +993,7 @@ std::string configToJson(const RepeaterConfig& config)
 {
     std::ostringstream out;
     out << "{\n"
+        << "  \"mode\": " << jsonString(config.mode) << ",\n"
         << "  \"statusIntervalMs\": " << config.statusInterval.count() << ",\n"
         << "  \"selection\": {\n"
         << "    \"minimumMerDb\": " << config.minimumMerDb << ",\n"
@@ -1034,6 +1054,10 @@ std::string configToJson(const RepeaterConfig& config)
         << "  },\n"
         << "  \"media\": {\n"
         << "    \"backend\": " << jsonString(config.media.backend) << "\n"
+        << "  },\n"
+        << "  \"tsGateway\": {\n"
+        << "    \"address\": " << jsonString(config.tsGateway.address) << ",\n"
+        << "    \"port\": " << config.tsGateway.port << "\n"
         << "  },\n"
         << "  \"hardwarePtt\": {\n"
         << "    \"enabled\": " << (config.hardwarePtt.enabled ? "true" : "false") << ",\n"

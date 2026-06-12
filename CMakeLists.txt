@@ -21,7 +21,7 @@ pkg_check_modules(GSTREAMER QUIET IMPORTED_TARGET
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-option(WH_REPEATER_BUILD_SD1_TOOLS "Build parked SD1 diagnostic tools" OFF)
+option(WH_REPEATER_BUILD_GATEWAY_TOOLS "Build TS gateway validation tools" ON)
 
 add_executable(wh-repeater
     src/main.cpp
@@ -32,6 +32,7 @@ add_executable(wh-repeater
     src/scan_scheduler.cpp
     src/signal_arbitrator.cpp
     src/ts_router.cpp
+    src/ts_gateway_sink.cpp
     src/pluto_sink.cpp
     src/pluto_mqtt_status.cpp
     src/ident.cpp
@@ -50,22 +51,20 @@ if(GSTREAMER_FOUND)
     target_link_libraries(wh-repeater PRIVATE PkgConfig::GSTREAMER)
 endif()
 
-if(WH_REPEATER_BUILD_SD1_TOOLS)
-    add_executable(sd1-activation-diag
-        tools/sd1_activation_diag.cpp
+if(WH_REPEATER_BUILD_GATEWAY_TOOLS)
+    add_executable(ts-gateway-inspect
+        tools/ts_gateway_inspect.cpp
     )
-
-    target_include_directories(sd1-activation-diag PRIVATE include)
 endif()
 
 if(MSVC)
     target_compile_options(wh-repeater PRIVATE /W4)
-    if(WH_REPEATER_BUILD_SD1_TOOLS)
-        target_compile_options(sd1-activation-diag PRIVATE /W4)
+    if(WH_REPEATER_BUILD_GATEWAY_TOOLS)
+        target_compile_options(ts-gateway-inspect PRIVATE /W4)
     endif()
 else()
     target_compile_options(wh-repeater PRIVATE -Wall -Wextra -Wpedantic)
-    if(WH_REPEATER_BUILD_SD1_TOOLS)
-        target_compile_options(sd1-activation-diag PRIVATE -Wall -Wextra -Wpedantic)
+    if(WH_REPEATER_BUILD_GATEWAY_TOOLS)
+        target_compile_options(ts-gateway-inspect PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()

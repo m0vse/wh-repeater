@@ -442,6 +442,18 @@ void ApiServer::updatePlutoStatus(PlutoMqttStatus status)
     plutoStatus_ = std::move(status);
 }
 
+void ApiServer::updateTsGatewayStatus(TsGatewayStatus status)
+{
+    std::lock_guard lock{snapshotMutex_};
+    tsGatewayStatus_ = std::move(status);
+}
+
+void ApiServer::updateReceiverTransitions(std::vector<ReceiverTransition> transitions)
+{
+    std::lock_guard lock{snapshotMutex_};
+    receiverTransitions_ = std::move(transitions);
+}
+
 void ApiServer::updateBeaconSchedule(bool active)
 {
     std::lock_guard lock{snapshotMutex_};
@@ -699,6 +711,8 @@ std::string ApiServer::statusJson() const
     std::optional<ActiveInput> active;
     std::optional<AnalogueStatus> analogue;
     std::optional<PlutoMqttStatus> pluto;
+    std::optional<TsGatewayStatus> tsGateway;
+    std::vector<ReceiverTransition> transitions;
     bool beaconScheduleActive{};
     RepeaterConfig config;
     {
@@ -707,12 +721,15 @@ std::string ApiServer::statusJson() const
         active = active_;
         analogue = analogueStatus_;
         pluto = plutoStatus_;
+        tsGateway = tsGatewayStatus_;
+        transitions = receiverTransitions_;
         beaconScheduleActive = beaconScheduleActive_;
         config = repeaterConfig_;
     }
 
     std::ostringstream out;
     out << "{";
+    out << "\"mode\":" << jsonString(config.mode) << ",";
     if (active.has_value()) {
         out << "\"activeReceiver\":" << active->receiver.value;
     } else {
@@ -779,7 +796,62 @@ std::string ApiServer::statusJson() const
             << "}";
     }
 
-    out << "],\"analogue\":";
+    out << "],\"tsGateway\":";
+    if (tsGateway.has_value()) {
+        out << "{"
+            << "\"enabled\":" << (tsGateway->enabled ? "true" : "false") << ","
+            << "\"address\":" << jsonString(tsGateway->address) << ","
+            << "\"port\":" << tsGateway->port << ","
+            << "\"activeReceiver\":";
+        if (tsGateway->activeReceiver.has_value()) {
+            out << tsGateway->activeReceiver->value;
+        } else {
+            out << "null";
+        }
+        out << ",\"transportPackets\":" << tsGateway->transportPackets
+            << ",\"datagrams\":" << tsGateway->datagrams
+            << ",\"bytes\":" << tsGateway->bytes
+            << ",\"sendErrors\":" << tsGateway->sendErrors
+            << ",\"updatedMsAgo\":" << updatedMsAgo(tsGateway->updatedAt)
+            << ",\"lastError\":" << (tsGateway->lastError.has_value() ? jsonString(*tsGateway->lastError) : "null")
+            << "}";
+    } else {
+        out << "{"
+            << "\"enabled\":false,"
+            << "\"address\":" << jsonString(config.tsGateway.address) << ","
+            << "\"port\":" << config.tsGateway.port << ","
+            << "\"activeReceiver\":null,"
+            << "\"transportPackets\":0,"
+            << "\"datagrams\":0,"
+            << "\"bytes\":0,"
+            << "\"sendErrors\":0,"
+            << "\"updatedMsAgo\":null,"
+            << "\"lastError\":null"
+            << "}";
+    }
+
+    out << ",\"receiverTransitions\":[";
+    for (std::size_t index = 0; index < transitions.size(); ++index) {
+        if (index != 0) {
+            out << ",";
+        }
+        const auto& transition = transitions[index];
+        out << "{"
+            << "\"receiver\":";
+        if (transition.receiver.has_value()) {
+            out << transition.receiver->value;
+        } else {
+            out << "null";
+        }
+        out << ",\"from\":" << jsonString(transition.from)
+            << ",\"to\":" << jsonString(transition.to)
+            << ",\"detail\":" << jsonString(transition.detail)
+            << ",\"updatedMsAgo\":" << updatedMsAgo(transition.updatedAt)
+            << "}";
+    }
+    out << "]";
+
+    out << ",\"analogue\":";
     if (analogue.has_value()) {
         out << "{"
             << "\"enabled\":" << (analogue->enabled ? "true" : "false") << ","

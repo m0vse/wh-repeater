@@ -140,6 +140,11 @@ struct MediaConfig {
     std::string backend{"ffmpeg"};
 };
 
+struct TsGatewayConfig {
+    std::string address{"127.0.0.1"};
+    std::uint16_t port{5000};
+};
+
 struct ReceiverConfig {
     ReceiverId receiver;
     bool enabled{true};
@@ -149,6 +154,7 @@ struct ReceiverConfig {
 };
 
 struct RepeaterConfig {
+    std::string mode{"local-transcode"};
     std::vector<ReceiverConfig> receivers;
     PlutoConfig pluto;
     FallbackConfig fallback;
@@ -158,6 +164,7 @@ struct RepeaterConfig {
     HardwarePttConfig hardwarePtt;
     AnalogueConfig analogue;
     MediaConfig media;
+    TsGatewayConfig tsGateway;
     std::chrono::milliseconds statusInterval{500};
     double minimumMerDb{2.0};
     double minimumDNumberDb{0.0};

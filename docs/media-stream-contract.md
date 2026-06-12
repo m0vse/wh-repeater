@@ -17,6 +17,11 @@
 
 # Media Stream Contract
 
+This contract applies to `local-transcode` mode. In `ts-gateway` mode the Pi
+bypasses the media worker entirely and forwards selected raw 188-byte MPEG-TS
+packets over UDP; FFmpeg, GStreamer, and H.264 codec availability must not be
+required for that gateway path.
+
 The output stream is continuous and fixed-format. Source changes must never
 change the advertised output parameters or interrupt the RTMP/output stream.
 

@@ -26,6 +26,9 @@ This is the first working streaming test build. It can:
 - generate a continuous MPEG-TS media pipeline with blue fallback/status slides;
 - require the Pi hardware H.264 encoder for all output video encoding;
 - stream the generated output to an optional RTMP server;
+- run in `ts-gateway` mode, where the Pi scans/selects the Winterhill receiver
+  and forwards the selected raw MPEG-TS to a configured PC over UDP as 1316-byte
+  datagrams;
 - isolate FFmpeg/V4L2 media handling in a supervised child process so the
   control daemon can restart media output after a media-worker failure;
 - publish PlutoPlus/F5OEO control over MQTT, including TX mute/PTT state;
@@ -51,7 +54,17 @@ The child owns FFmpeg, V4L2 codec devices, Pluto UDP output, and RTMP output.
 The parent keeps API/config/scanning/PTT state alive, sends control and selected
 TS packets over a local Unix socket, and restarts the media child if it exits.
 
-`media.backend` selects the media implementation. `ffmpeg` is the stable default.
+`mode` selects the daemon output model. `local-transcode` is the current Pi-local
+media/retransmit path. `ts-gateway` keeps the Winterhill NIM scanning and active
+receiver selection on the Pi, but bypasses the media worker and forwards raw
+188-byte MPEG-TS packets to `tsGateway.address`/`tsGateway.port`, grouped as
+seven packets per UDP datagram. FFmpeg, GStreamer, and H.264 hardware codec
+availability are not required in `ts-gateway` mode.
+The Pi/PC gateway boundary is documented in
+[`docs/pi-gateway-api.md`](docs/pi-gateway-api.md).
+
+`media.backend` selects the media implementation used by `local-transcode`.
+`ffmpeg` is the stable default.
 `gstreamer` is an experimental complete media backend. When selected, generated
 fallback/slides, fallback videos, DVB retransmit, analogue capture, MPEG-TS
 output, and RTMP output are handled through GStreamer pipelines instead of the
@@ -166,6 +179,8 @@ sudo chmod 0644 /etc/ssl/wh-repeater/wh-repeater.crt
 
 The main sections are:
 
+- `mode`: `local-transcode` for the existing Pi media path, or `ts-gateway` for
+  raw TS forwarding to a PC;
 - `receivers`: RX1-RX4 scan targets, dwell time, and hang time;
 - `analogue.capture`: generic USB/V4L2 analogue capture configuration;
 - `analogue.sd1`: parked SD1 analogue configuration, disabled by default;
@@ -180,6 +195,8 @@ The main sections are:
 - `streaming.rtmp`: optional direct RTMP output URL;
 - `media`: selected media backend, currently stable `ffmpeg` or experimental
   complete-path `gstreamer`;
+- `tsGateway`: UDP destination address and port for `ts-gateway` raw MPEG-TS
+  forwarding;
 - `hardwarePtt`: optional GPIO PTT output for amplifier/sequencer switching;
 - `beaconSchedule`: UTC operating hours for beacon/slideshow TX versus sleep mode;
 - `ident`: service name and ident interval;
@@ -246,6 +263,8 @@ and uses the serial-scoped `cmd/pluto/<device-id>/...` and
   control.
 - `src/pluto_sink.cpp`: Pluto UDP TS output and MQTT transmit control.
 - `src/pluto_mqtt_status.cpp`: Pluto MQTT status subscription.
+- `src/ts_gateway_sink.cpp`: raw 188-byte MPEG-TS UDP gateway output.
+- `tools/ts_gateway_inspect.cpp`: standalone UDP TS gateway validation tool.
 - `src/media_process.cpp`: parent-side media child supervision and IPC.
 - `src/media_pipeline.cpp`: child-side FFmpeg/V4L2 media generation,
   encoding, RTMP output, and fallback rendering.

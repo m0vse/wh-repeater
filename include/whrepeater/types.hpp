@@ -98,6 +98,27 @@ struct AnalogueStatus {
     std::optional<std::string> error;
 };
 
+struct TsGatewayStatus {
+    bool enabled{};
+    std::string address;
+    std::uint16_t port{};
+    std::optional<ReceiverId> activeReceiver;
+    std::uint64_t transportPackets{};
+    std::uint64_t datagrams{};
+    std::uint64_t bytes{};
+    std::uint64_t sendErrors{};
+    std::chrono::steady_clock::time_point updatedAt{std::chrono::steady_clock::now()};
+    std::optional<std::string> lastError;
+};
+
+struct ReceiverTransition {
+    std::optional<ReceiverId> receiver;
+    std::string from;
+    std::string to;
+    std::string detail;
+    std::chrono::steady_clock::time_point updatedAt{std::chrono::steady_clock::now()};
+};
+
 struct ActiveInput {
     ReceiverId receiver;
     ScanTarget target;
