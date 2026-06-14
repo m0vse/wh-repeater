@@ -4054,6 +4054,11 @@ private:
                 continue;
             }
             lastVideoPts = pts;
+            waitForOutputVideoLead(outputMuxer, pts);
+            if (stopping_.load()) {
+                av_frame_unref(frame);
+                break;
+            }
             outputMuxer.submitVideoFrame(convertFrame(frame, convertedFrame, scaler, outputMuxer, streamSampleAspect, pts), "fallback-video");
             frameIndex = pts + 1;
             av_frame_unref(frame);
@@ -4088,6 +4093,16 @@ private:
                                                         / fallbackSourceFrameRate));
         }
         return std::max<std::int64_t>(0, pts);
+    }
+
+    void waitForOutputVideoLead(const EncodedOutputSink& outputMuxer, std::int64_t pts)
+    {
+        // Fallback-video playback is paced by output PTS, not queue depth or
+        // decoder/file speed. Keep this aligned with docs/media-stream-contract.md.
+        const auto maxLeadFrames = std::max<std::int64_t>(2, (outputMuxer.frameRate() + 9) / 10);
+        while (!stopping_.load() && pts >= outputMuxer.nextVideoPts() + maxLeadFrames) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
     }
 
     AVFrame* convertFrame(AVFrame* frame,
@@ -4303,7 +4318,22 @@ private:
                 throw std::runtime_error{"read fallback audio FIFO failed"};
             }
             audioPts += samples;
+            waitForOutputAudioLead(outputMuxer, frame->pts, *audioCodec);
+            if (stopping_.load()) {
+                return;
+            }
             outputMuxer.submitAudioFrame(frame.get(), "fallback-video");
+        }
+    }
+
+    void waitForOutputAudioLead(const EncodedOutputSink& outputMuxer,
+                                std::int64_t pts,
+                                const AVCodecContext& audioCodec)
+    {
+        const auto maxLeadSamples = std::max<std::int64_t>(audioCodec.sample_rate / 10,
+                                                           (audioCodec.frame_size > 0 ? audioCodec.frame_size : 1024) * 2);
+        while (!stopping_.load() && pts >= outputMuxer.nextAudioPts() + maxLeadSamples) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }
     }
 
@@ -5457,7 +5487,7 @@ public:
             submittedVideoBaseFrame_ = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
         }
         if (sourceText == "fallback-video") {
-            constexpr std::size_t maxQueuedVideoFrames{8};
+            const auto maxQueuedVideoFrames = static_cast<std::size_t>(std::max(2, (frameRate_ + 9) / 10));
             while (submittedVideoFrames_.size() >= maxQueuedVideoFrames) {
                 submittedVideoConsumed_.wait_for(lock, std::chrono::milliseconds{100});
                 if (submittedVideoFrames_.size() >= maxQueuedVideoFrames) {

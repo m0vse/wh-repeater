@@ -53,6 +53,11 @@ Required invariants:
   parameters, frame dimensions, frame rate, time base, or audio parameters.
 - Invalid, missing, or stalled input must be replaced with valid generated
   frames and valid audio/silence so encoder time continues monotonically.
+- The output muxer PTS is the single source of truth for stream timing. Input
+  PTS/DTS, file timestamps, decoder delivery rate, demux read speed, queue
+  depth, wall clock, and API commands may be used only to map source media onto
+  the output timeline; they must never overwrite, advance, or independently
+  pace the output PTS.
 - The H.264 encoder boundary must validate every submitted frame. A frame is
   valid only if it matches the configured encoder pixel format, dimensions, and
   timing, has populated data planes, and has a monotonic presentation timestamp.
@@ -71,6 +76,14 @@ Required invariants:
   priority over lowest possible CPU use. Using one hot CPU thread for software
   decode, timestamp pacing, scaling, and audio sync is acceptable if it keeps the
   hardware encoder and RTMP/output stream stable.
+- Hard rule: fallback-video file playback must be paced against the common
+  output muxer PTS for both video and audio. The file reader/decoder may buffer a
+  small amount ahead of the output clock to absorb decode jitter, but it must
+  block when decoded video or decoded audio is more than the permitted PTS lead
+  ahead of `nextVideoPts()` / `nextAudioPts()`. Do not pace fallback videos by
+  queue depth alone, decoder throughput, source frame rate sleeps, or source
+  timestamps. Those approaches have previously caused real playback-speed and
+  A/V timing regressions.
 - Fallback videos should be prepared to match the configured output width,
   height, and frame rate whenever practical. Mismatched files are still accepted
   and transcoded into the fixed output profile, but software scaling, frame-rate
