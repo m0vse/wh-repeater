@@ -996,9 +996,8 @@ std::vector<bool> morseToneUnits(std::string_view text)
 
 std::string sleepingMessage(const RepeaterConfig& config)
 {
-    const auto callsign = config.pluto.callsign.empty() ? std::string{"WH Repeater"} : config.pluto.callsign;
-    return callsign + " is in power saving mode\n"
-        + "sleeping between " + config.beaconSchedule.endTime + " and " + config.beaconSchedule.startTime + "\n"
+    return std::string{"Power Saving Mode\n"}
+        + "sleeping between " + config.beaconSchedule.endTime + " and " + config.beaconSchedule.startTime + "\n\n"
         + "The repeater can be woken during this time\n"
         + "with a video signal on any input.\n"
         + "Back to sleep after access.";

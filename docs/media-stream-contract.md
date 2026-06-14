@@ -119,3 +119,25 @@ Output path:
 - Once RTMP has accepted its first video/audio profile, later source changes
   must match that profile. Mismatches are output-contract violations and must
   not renegotiate the live stream.
+
+Future option: editable HTML/CSS slates
+
+- Sleep, access, signal-received, and diagnostic slates may later move from
+  hardcoded C++ strings/layout into operator-editable local HTML/CSS templates.
+- Templates should be local files with local assets and a small set of repeater
+  variables substituted by the daemon, for example callsign, receiver name,
+  service name, video format, access duration, and sleep schedule times.
+- The preferred architecture is render-on-change into a cached bitmap at the
+  configured output size, then repeat that bitmap through the existing generated
+  frame path. Slate rendering must not run in the per-frame critical path.
+- The renderer may be an external headless browser, an embedded lightweight
+  engine such as `litehtml` with a Cairo/Pango drawing backend, or another
+  equivalent HTML/CSS renderer. Embedded CEF is possible but should be treated
+  as a heavier option due to Chromium runtime, packaging, helper processes, and
+  operational complexity.
+- JavaScript and remote network assets should be avoided for first
+  implementation. Static HTML/CSS with local images is enough for the expected
+  slate use case and is easier to make deterministic.
+- Rendering failure must not interrupt output. The media path should reuse the
+  last good rendered slate, or fall back to a built-in emergency slate if no
+  rendered slate is available.
