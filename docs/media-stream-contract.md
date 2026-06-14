@@ -50,6 +50,12 @@ Required invariants:
   notices, sleep slates, and testcards must all be transcoded into the same
   configured output video format.
 - Audio must always be encoded into the same configured output audio format.
+  The FFmpeg output path currently uses AAC at 48 kHz with configurable output
+  channels for both Pluto TS and RTMP. The default is stereo. With stereo output,
+  stereo sources must remain stereo, mono sources must be duplicated or
+  otherwise mapped into valid stereo, and multichannel sources must be downmixed
+  to stereo. Do not collapse stereo to mono unless the operator explicitly
+  configures mono output: phase-opposed diagnostic audio can cancel to silence.
 - A source change must not recreate the RTMP stream with different codec
   parameters, frame dimensions, frame rate, time base, or audio parameters.
 - Invalid, missing, or stalled input must be replaced with valid generated

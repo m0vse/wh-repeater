@@ -22,12 +22,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 option(WH_REPEATER_BUILD_GATEWAY_TOOLS "Build TS gateway validation tools" ON)
+option(WH_REPEATER_BUILD_TESTS "Build unit tests" ON)
 
 set(WH_REPEATER_COMMON_SOURCES
     src/main.cpp
     src/api_server.cpp
     src/config.cpp
     src/daemon.cpp
+    src/gateway_status_client.cpp
     src/hardware_ptt.cpp
     src/ident.cpp
 )
@@ -44,18 +46,17 @@ set(WH_REPEATER_PI_GATEWAY_SOURCES
 
 set(WH_REPEATER_PC_GATEWAY_SOURCES
     ${WH_REPEATER_COMMON_SOURCES}
-    src/gateway_status_client.cpp
     src/pc_gateway_input.cpp
     src/pluto_sink.cpp
     src/pluto_mqtt_status.cpp
     src/gstreamer_backend.cpp
     src/media_process.cpp
+    src/media_timing.cpp
     src/media_pipeline.cpp
 )
 
 set(WH_REPEATER_LEGACY_SOURCES
     ${WH_REPEATER_COMMON_SOURCES}
-    src/gateway_status_client.cpp
     src/i2c_bus_lock.cpp
     src/nim_controller.cpp
     src/pc_gateway_input.cpp
@@ -67,6 +68,7 @@ set(WH_REPEATER_LEGACY_SOURCES
     src/pluto_mqtt_status.cpp
     src/gstreamer_backend.cpp
     src/media_process.cpp
+    src/media_timing.cpp
     src/media_pipeline.cpp
 )
 
@@ -107,4 +109,32 @@ if(WH_REPEATER_BUILD_GATEWAY_TOOLS)
     else()
         target_compile_options(ts-gateway-inspect PRIVATE -Wall -Wextra -Wpedantic)
     endif()
+endif()
+
+if(WH_REPEATER_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(config-tests
+        tests/config_tests.cpp
+        src/config.cpp
+    )
+    target_include_directories(config-tests PRIVATE include)
+    if(MSVC)
+        target_compile_options(config-tests PRIVATE /W4)
+    else()
+        target_compile_options(config-tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME config-tests COMMAND config-tests)
+
+    add_executable(media-timing-tests
+        tests/media_timing_tests.cpp
+        src/media_timing.cpp
+    )
+    target_include_directories(media-timing-tests PRIVATE include)
+    if(MSVC)
+        target_compile_options(media-timing-tests PRIVATE /W4)
+    else()
+        target_compile_options(media-timing-tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME media-timing-tests COMMAND media-timing-tests)
 endif()
