@@ -106,6 +106,20 @@ bool GatewayStatusClient::putConfig(const RepeaterConfig& config)
     return true;
 }
 
+bool GatewayStatusClient::restartService()
+{
+    auto response = request("POST", "/api/service/restart");
+    if (!response.has_value()) {
+        return false;
+    }
+    if (response->status != 200 && response->status != 202) {
+        lastError_ = "Pi service restart response was HTTP " + std::to_string(response->status);
+        return false;
+    }
+    lastError_.reset();
+    return true;
+}
+
 const std::optional<std::string>& GatewayStatusClient::lastError() const
 {
     return lastError_;

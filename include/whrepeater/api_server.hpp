@@ -56,9 +56,12 @@ public:
     void updateRemoteGatewayStatus(std::optional<std::string> statusJson);
     void updateReceiverTransitions(std::vector<ReceiverTransition> transitions);
     void updateBeaconSchedule(bool active);
+    void updatePreviewStatus(bool requested, bool active);
+    void updateFallbackVideoStatus(std::optional<std::string> statusJson);
     std::optional<RepeaterConfig> takePendingConfig();
     std::optional<std::string> takePendingFallbackVideo();
     bool takePendingFallbackVideoStop();
+    std::optional<std::chrono::milliseconds> takePendingFallbackVideoSeek();
     std::optional<bool> takePendingPreviewEnabled();
 
 private:
@@ -77,10 +80,14 @@ private:
     std::optional<std::string> remoteGatewayStatusJson_;
     std::vector<ReceiverTransition> receiverTransitions_;
     bool beaconScheduleActive_{true};
+    bool previewRequested_{false};
+    bool previewActive_{false};
     std::optional<ActiveInput> active_;
     std::optional<RepeaterConfig> pendingConfig_;
     std::optional<std::string> pendingFallbackVideo_;
     bool pendingFallbackVideoStop_{false};
+    std::optional<std::chrono::milliseconds> pendingFallbackVideoSeek_;
+    std::optional<std::string> fallbackVideoStatusJson_;
     std::optional<bool> pendingPreviewEnabled_;
     std::atomic_bool running_{false};
     int serverFd_{-1};

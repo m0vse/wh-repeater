@@ -17,6 +17,8 @@
 
 #include "whrepeater/api_server.hpp"
 
+#include "whrepeater/gateway_status_client.hpp"
+
 #include <arpa/inet.h>
 #include <array>
 #include <algorithm>
@@ -26,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <netinet/in.h>
 #include <sstream>
@@ -36,6 +39,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace whrepeater {
 namespace {
@@ -266,6 +270,287 @@ std::optional<std::string_view> jsonMember(std::string_view object, std::string_
         --end;
     }
     return object.substr(start, end - start);
+}
+
+std::string_view trimJson(std::string_view value)
+{
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) {
+        return {};
+    }
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+std::optional<int> jsonIntValue(std::string_view value)
+{
+    value = trimJson(value);
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    int parsed{};
+    bool negative{};
+    std::size_t index{};
+    if (value[index] == '-') {
+        negative = true;
+        ++index;
+    }
+    if (index >= value.size() || !std::isdigit(static_cast<unsigned char>(value[index]))) {
+        return std::nullopt;
+    }
+    for (; index < value.size(); ++index) {
+        const auto ch = value[index];
+        if (!std::isdigit(static_cast<unsigned char>(ch))) {
+            return std::nullopt;
+        }
+        parsed = parsed * 10 + (ch - '0');
+    }
+    return negative ? -parsed : parsed;
+}
+
+std::optional<std::int64_t> jsonInt64Value(std::string_view value)
+{
+    value = trimJson(value);
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    std::int64_t parsed{};
+    bool negative{};
+    std::size_t index{};
+    if (value[index] == '-') {
+        negative = true;
+        ++index;
+    }
+    if (index >= value.size() || !std::isdigit(static_cast<unsigned char>(value[index]))) {
+        return std::nullopt;
+    }
+    for (; index < value.size(); ++index) {
+        const auto ch = value[index];
+        if (!std::isdigit(static_cast<unsigned char>(ch))) {
+            return std::nullopt;
+        }
+        parsed = parsed * 10 + (ch - '0');
+    }
+    return negative ? -parsed : parsed;
+}
+
+std::string unquotedJsonString(std::string_view value)
+{
+    value = trimJson(value);
+    if (value.size() < 2 || value.front() != '"' || value.back() != '"') {
+        return {};
+    }
+    std::string out;
+    for (std::size_t index = 1; index + 1 < value.size(); ++index) {
+        const auto ch = value[index];
+        if (ch == '\\' && index + 1 < value.size() - 1) {
+            ++index;
+            out.push_back(value[index]);
+        } else {
+            out.push_back(ch);
+        }
+    }
+    return out;
+}
+
+std::optional<std::chrono::milliseconds> parseTimecode(std::string_view text)
+{
+    text = trimJson(text);
+    if (text.empty()) {
+        return std::nullopt;
+    }
+    std::vector<std::string_view> parts;
+    std::size_t start{};
+    while (start <= text.size()) {
+        const auto colon = text.find(':', start);
+        parts.push_back(text.substr(start, colon == std::string_view::npos ? std::string_view::npos : colon - start));
+        if (colon == std::string_view::npos) {
+            break;
+        }
+        start = colon + 1;
+    }
+    if (parts.empty() || parts.size() > 3) {
+        return std::nullopt;
+    }
+
+    auto parseWhole = [](std::string_view value) -> std::optional<std::int64_t> {
+        if (value.empty()) {
+            return std::nullopt;
+        }
+        std::int64_t parsed{};
+        for (const auto ch : value) {
+            if (!std::isdigit(static_cast<unsigned char>(ch))) {
+                return std::nullopt;
+            }
+            parsed = parsed * 10 + (ch - '0');
+        }
+        return parsed;
+    };
+
+    std::int64_t milliseconds{};
+    auto secondsText = parts.back();
+    std::int64_t fractionalMs{};
+    if (const auto dot = secondsText.find('.'); dot != std::string_view::npos) {
+        auto fraction = secondsText.substr(dot + 1);
+        secondsText = secondsText.substr(0, dot);
+        int digits{};
+        for (const auto ch : fraction) {
+            if (!std::isdigit(static_cast<unsigned char>(ch)) || digits >= 3) {
+                break;
+            }
+            fractionalMs = fractionalMs * 10 + (ch - '0');
+            ++digits;
+        }
+        while (digits++ < 3) {
+            fractionalMs *= 10;
+        }
+    }
+    const auto seconds = parseWhole(secondsText);
+    if (!seconds.has_value()) {
+        return std::nullopt;
+    }
+    milliseconds += *seconds * 1000 + fractionalMs;
+    if (parts.size() >= 2) {
+        const auto minutes = parseWhole(parts[parts.size() - 2]);
+        if (!minutes.has_value()) {
+            return std::nullopt;
+        }
+        milliseconds += *minutes * 60 * 1000;
+    }
+    if (parts.size() == 3) {
+        const auto hours = parseWhole(parts[0]);
+        if (!hours.has_value()) {
+            return std::nullopt;
+        }
+        milliseconds += *hours * 60 * 60 * 1000;
+    }
+    return std::chrono::milliseconds{std::max<std::int64_t>(0, milliseconds)};
+}
+
+std::string formatTimecode(std::chrono::milliseconds position)
+{
+    auto totalMs = std::max<std::int64_t>(0, position.count());
+    const auto hours = totalMs / 3'600'000;
+    totalMs %= 3'600'000;
+    const auto minutes = totalMs / 60'000;
+    totalMs %= 60'000;
+    const auto seconds = totalMs / 1000;
+    const auto millis = totalMs % 1000;
+    std::ostringstream out;
+    out << std::setfill('0') << std::setw(2) << hours << ':'
+        << std::setw(2) << minutes << ':'
+        << std::setw(2) << seconds << '.'
+        << std::setw(3) << millis;
+    return out.str();
+}
+
+bool receiverEnabled(const RepeaterConfig& config, ReceiverId receiver)
+{
+    for (const auto& configured : config.receivers) {
+        if (configured.receiver == receiver) {
+            return configured.enabled;
+        }
+    }
+    return true;
+}
+
+std::string filterReceiverArrayByConfig(std::string_view receiversJson, const RepeaterConfig& config)
+{
+    const auto body = trimJson(receiversJson);
+    if (body.size() < 2 || body.front() != '[' || body.back() != ']') {
+        return std::string{receiversJson};
+    }
+
+    std::ostringstream out;
+    out << "[";
+    bool wrote{};
+    auto pos = std::size_t{1};
+    while (pos + 1 < body.size()) {
+        while (pos < body.size() && (std::isspace(static_cast<unsigned char>(body[pos])) || body[pos] == ',')) {
+            ++pos;
+        }
+        if (pos >= body.size() || body[pos] == ']') {
+            break;
+        }
+        if (body[pos] != '{') {
+            return std::string{receiversJson};
+        }
+
+        const auto start = pos;
+        int depth{};
+        bool inString{};
+        bool escaped{};
+        for (; pos < body.size(); ++pos) {
+            const auto ch = body[pos];
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (ch == '\\') {
+                    escaped = true;
+                } else if (ch == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (ch == '"') {
+                inString = true;
+            } else if (ch == '{') {
+                ++depth;
+            } else if (ch == '}') {
+                --depth;
+                if (depth == 0) {
+                    ++pos;
+                    break;
+                }
+            }
+        }
+        if (depth != 0) {
+            return std::string{receiversJson};
+        }
+
+        const auto object = body.substr(start, pos - start);
+        std::optional<int> id;
+        if (const auto idValue = jsonMember(object, "id")) {
+            id = jsonIntValue(*idValue);
+        }
+        if (!id.has_value() || receiverEnabled(config, ReceiverId{*id})) {
+            if (wrote) {
+                out << ",";
+            }
+            wrote = true;
+            out << object;
+        }
+    }
+    out << "]";
+    return out.str();
+}
+
+std::string serviceNameForMode(std::string_view mode)
+{
+    if (mode == "pc-gateway") {
+        return "wh-pc-gateway.service";
+    }
+    if (mode == "ts-gateway") {
+        return "wh-pi-gateway.service";
+    }
+    return "wh-repeater.service";
+}
+
+int requestSystemdServiceAction(std::string_view action, std::string_view serviceName)
+{
+    const auto command = "systemctl --no-block " + std::string{action} + " " + std::string{serviceName} + " >/dev/null 2>&1";
+    return std::system(command.c_str());
+}
+
+int requestSystemdServiceAction(std::string_view action, const RepeaterConfig& config)
+{
+    return requestSystemdServiceAction(action, serviceNameForMode(config.mode));
+}
+
+bool systemdServiceActive(std::string_view serviceName)
+{
+    const auto command = "systemctl is-active --quiet " + std::string{serviceName} + " >/dev/null 2>&1";
+    return std::system(command.c_str()) == 0;
 }
 
 void writeResponse(int clientFd, std::string_view status, std::string_view contentType, std::string_view body)
@@ -543,6 +828,19 @@ void ApiServer::updateBeaconSchedule(bool active)
     beaconScheduleActive_ = active;
 }
 
+void ApiServer::updatePreviewStatus(bool requested, bool active)
+{
+    std::lock_guard lock{snapshotMutex_};
+    previewRequested_ = requested;
+    previewActive_ = active;
+}
+
+void ApiServer::updateFallbackVideoStatus(std::optional<std::string> statusJson)
+{
+    std::lock_guard lock{snapshotMutex_};
+    fallbackVideoStatusJson_ = std::move(statusJson);
+}
+
 void ApiServer::updateConfig(RepeaterConfig config)
 {
     std::lock_guard lock{snapshotMutex_};
@@ -570,6 +868,14 @@ bool ApiServer::takePendingFallbackVideoStop()
     std::lock_guard lock{snapshotMutex_};
     const auto pending = pendingFallbackVideoStop_;
     pendingFallbackVideoStop_ = false;
+    return pending;
+}
+
+std::optional<std::chrono::milliseconds> ApiServer::takePendingFallbackVideoSeek()
+{
+    std::lock_guard lock{snapshotMutex_};
+    auto pending = pendingFallbackVideoSeek_;
+    pendingFallbackVideoSeek_.reset();
     return pending;
 }
 
@@ -649,6 +955,24 @@ void ApiServer::handleClient(int clientFd)
     if (method == "GET" && path == "/api/config") {
         const auto body = configJson();
         writeResponse(clientFd, "200 OK", "application/json", body);
+        return;
+    }
+
+    if (method == "GET" && path == "/api/preview/status") {
+        bool requested{};
+        bool active{};
+        {
+            std::lock_guard lock{snapshotMutex_};
+            requested = previewRequested_;
+            active = previewActive_;
+        }
+        const auto serviceActive = systemdServiceActive("wh-preview.service");
+        active = active || serviceActive;
+        std::ostringstream body;
+        body << "{\"requested\":" << (requested ? "true" : "false")
+             << ",\"active\":" << (active ? "true" : "false")
+             << ",\"serviceActive\":" << (serviceActive ? "true" : "false") << "}\n";
+        writeResponse(clientFd, "200 OK", "application/json", body.str());
         return;
     }
 
@@ -755,6 +1079,41 @@ void ApiServer::handleClient(int clientFd)
         return;
     }
 
+    if (method == "POST" && path == "/api/fallback/seek") {
+        const auto bodyStart = request.find("\r\n\r\n");
+        if (bodyStart == std::string_view::npos) {
+            writeResponse(clientFd, "400 Bad Request", "application/json", "{\"error\":\"missing request body\"}\n");
+            return;
+        }
+
+        const auto body = request.substr(bodyStart + 4);
+        std::optional<std::chrono::milliseconds> position;
+        if (const auto value = jsonMember(body, "positionMs"); value.has_value()) {
+            if (const auto parsed = jsonInt64Value(*value); parsed.has_value()) {
+                position = std::chrono::milliseconds{std::max<std::int64_t>(0, *parsed)};
+            }
+        }
+        if (!position.has_value()) {
+            if (const auto value = jsonMember(body, "timecode"); value.has_value()) {
+                position = parseTimecode(unquotedJsonString(*value));
+            }
+        }
+        if (!position.has_value()) {
+            writeResponse(clientFd, "400 Bad Request", "application/json", "{\"error\":\"invalid timecode\"}\n");
+            return;
+        }
+
+        {
+            std::lock_guard lock{snapshotMutex_};
+            pendingFallbackVideoSeek_ = position;
+        }
+        const auto response = std::string{"{\"accepted\":true,\"positionMs\":"}
+            + std::to_string(position->count())
+            + ",\"timecode\":" + jsonString(formatTimecode(*position)) + "}\n";
+        writeResponse(clientFd, "202 Accepted", "application/json", response);
+        return;
+    }
+
     if (method == "POST" && path == "/api/preview/start") {
         {
             std::lock_guard lock{snapshotMutex_};
@@ -773,8 +1132,29 @@ void ApiServer::handleClient(int clientFd)
         return;
     }
 
+    if (method == "POST" && path == "/api/preview/service/start") {
+        const auto status = requestSystemdServiceAction("start", "wh-preview.service");
+        writeResponse(clientFd,
+                      status == 0 ? "202 Accepted" : "500 Internal Server Error",
+                      "application/json",
+                      status == 0 ? "{\"accepted\":true,\"state\":\"start-requested\"}\n"
+                                  : "{\"error\":\"preview service start failed\"}\n");
+        return;
+    }
+
+    if (method == "POST" && path == "/api/preview/service/stop") {
+        writeResponse(clientFd, "202 Accepted", "application/json", "{\"accepted\":true,\"state\":\"stop-requested\"}\n");
+        (void)requestSystemdServiceAction("stop", "wh-preview.service");
+        return;
+    }
+
     if (method == "POST" && path == "/api/service/start") {
-        const auto status = std::system("systemctl --no-block start wh-repeater.service >/dev/null 2>&1");
+        RepeaterConfig config;
+        {
+            std::lock_guard lock{snapshotMutex_};
+            config = repeaterConfig_;
+        }
+        const auto status = requestSystemdServiceAction("start", config);
         writeResponse(clientFd,
                       status == 0 ? "202 Accepted" : "500 Internal Server Error",
                       "application/json",
@@ -784,14 +1164,44 @@ void ApiServer::handleClient(int clientFd)
     }
 
     if (method == "POST" && path == "/api/service/stop") {
+        RepeaterConfig config;
+        {
+            std::lock_guard lock{snapshotMutex_};
+            config = repeaterConfig_;
+        }
         writeResponse(clientFd, "202 Accepted", "application/json", "{\"accepted\":true,\"state\":\"stop-requested\"}\n");
-        (void)std::system("systemctl --no-block stop wh-repeater.service >/dev/null 2>&1");
+        (void)requestSystemdServiceAction("stop", config);
         return;
     }
 
     if (method == "POST" && path == "/api/service/restart") {
+        RepeaterConfig config;
+        {
+            std::lock_guard lock{snapshotMutex_};
+            config = repeaterConfig_;
+        }
         writeResponse(clientFd, "202 Accepted", "application/json", "{\"accepted\":true,\"state\":\"restart-requested\"}\n");
-        (void)std::system("systemctl --no-block restart wh-repeater.service >/dev/null 2>&1");
+        (void)requestSystemdServiceAction("restart", config);
+        return;
+    }
+
+    if (method == "POST" && path == "/api/pi/service/restart") {
+        RepeaterConfig config;
+        {
+            std::lock_guard lock{snapshotMutex_};
+            config = repeaterConfig_;
+        }
+        if (!config.piStatus.enabled) {
+            writeResponse(clientFd, "409 Conflict", "application/json", "{\"error\":\"Pi status polling is disabled\"}\n");
+            return;
+        }
+        GatewayStatusClient client{config.piStatus};
+        if (!client.restartService()) {
+            const auto error = client.lastError().value_or("Pi service restart failed");
+            writeResponse(clientFd, "502 Bad Gateway", "application/json", "{\"error\":" + jsonString(error) + "}\n");
+            return;
+        }
+        writeResponse(clientFd, "202 Accepted", "application/json", "{\"accepted\":true,\"state\":\"pi-restart-requested\"}\n");
         return;
     }
 
@@ -822,8 +1232,11 @@ std::string ApiServer::statusJson() const
     std::optional<PlutoMqttStatus> pluto;
     std::optional<TsGatewayStatus> tsGateway;
     std::optional<std::string> remoteGatewayStatus;
+    std::optional<std::string> fallbackVideoStatus;
     std::vector<ReceiverTransition> transitions;
     bool beaconScheduleActive{};
+    bool previewRequested{};
+    bool previewActive{};
     RepeaterConfig config;
     {
         std::lock_guard lock{snapshotMutex_};
@@ -833,8 +1246,11 @@ std::string ApiServer::statusJson() const
         pluto = plutoStatus_;
         tsGateway = tsGatewayStatus_;
         remoteGatewayStatus = remoteGatewayStatusJson_;
+        fallbackVideoStatus = fallbackVideoStatusJson_;
         transitions = receiverTransitions_;
         beaconScheduleActive = beaconScheduleActive_;
+        previewRequested = previewRequested_;
+        previewActive = previewActive_;
         config = repeaterConfig_;
     }
 
@@ -850,11 +1266,46 @@ std::string ApiServer::statusJson() const
     const auto remoteTransitions = config.mode == "pc-gateway" && !remoteStatus.empty()
         ? jsonMember(remoteStatus, "receiverTransitions")
         : std::optional<std::string_view>{};
-
+    const auto localAnalogueActive = active.has_value()
+        && active->receiver == config.analogue.capture.receiver;
+    const auto analogueVisible = analogue.has_value() && analogue->enabled;
     std::ostringstream out;
+    const auto writeAnalogueReceiver = [&] {
+        const auto state = !analogue->present ? "fault" : analogue->locked ? "lockedAnalogue" : analogue->ready ? "idle" : "fault";
+        out << "{"
+            << "\"id\":" << config.analogue.capture.receiver.value << ","
+            << "\"name\":" << jsonString(config.analogue.capture.label.empty() ? "Analogue" : config.analogue.capture.label) << ","
+            << "\"type\":\"analogue\","
+            << "\"deviceId\":" << jsonString(config.analogue.capture.deviceId) << ","
+            << "\"state\":" << jsonString(state) << ","
+            << "\"target\":null,"
+            << "\"merDb\":null,"
+            << "\"dNumberDb\":null,"
+            << "\"serviceName\":" << jsonString(config.analogue.capture.label.empty() ? "Analogue" : config.analogue.capture.label) << ","
+            << "\"modulation\":\"SD analogue\","
+            << "\"transportPackets\":0,"
+            << "\"continuityErrors\":0,"
+            << "\"updatedMsAgo\":" << updatedMsAgo(analogue->updatedAt) << ","
+            << "\"present\":" << (analogue->present ? "true" : "false") << ","
+            << "\"detected\":" << (analogue->present ? "true" : "false") << ","
+            << "\"ready\":" << (analogue->ready ? "true" : "false") << ","
+            << "\"locked\":" << (analogue->locked ? "true" : "false") << ","
+            << "\"rawLock\":" << static_cast<int>(analogue->rawLock) << ","
+            << "\"cameraRunning\":" << (analogue->cameraRunning ? "true" : "false") << ","
+            << "\"source\":" << jsonString(analogue->activeSource.empty() ? analogue->selectedSource : analogue->activeSource) << ","
+            << "\"firmwareVersion\":" << jsonString(analogue->firmwareVersion) << ","
+            << "\"hardwareId\":" << jsonString(analogue->hardwareId) << ","
+            << "\"error\":" << (analogue->error.has_value() ? jsonString(*analogue->error) : "null")
+            << "}";
+    };
+
     out << "{";
     out << "\"mode\":" << jsonString(config.mode) << ",";
-    if (remoteActive.has_value()) {
+    if (localAnalogueActive) {
+        out << "\"activeReceiver\":" << active->receiver.value;
+    } else if (remoteActive.has_value()
+        && (!jsonIntValue(*remoteActive).has_value()
+            || receiverEnabled(config, ReceiverId{*jsonIntValue(*remoteActive)}))) {
         out << "\"activeReceiver\":" << *remoteActive;
     } else if (active.has_value()) {
         out << "\"activeReceiver\":" << active->receiver.value;
@@ -864,13 +1315,32 @@ std::string ApiServer::statusJson() const
     out << ",\"receivers\":";
 
     if (remoteReceivers.has_value()) {
-        out << *remoteReceivers;
+        const auto filteredRemoteReceivers = filterReceiverArrayByConfig(*remoteReceivers, config);
+        if (analogueVisible) {
+            const auto body = trimJson(filteredRemoteReceivers);
+            if (body.size() >= 2 && body.front() == '[' && body.back() == ']') {
+                const auto contents = trimJson(body.substr(1, body.size() - 2));
+                out << "[";
+                if (!contents.empty()) {
+                    out << contents << ",";
+                }
+                writeAnalogueReceiver();
+                out << "]";
+            } else {
+                out << filteredRemoteReceivers;
+            }
+        } else {
+            out << filteredRemoteReceivers;
+        }
     } else {
         out << "[";
 
         bool wroteReceiver = false;
         for (std::size_t index = 0; index < statuses.size(); ++index) {
             const auto& status = statuses[index];
+            if (!receiverEnabled(config, status.receiver)) {
+                continue;
+            }
             if (wroteReceiver) {
                 out << ",";
             }
@@ -906,36 +1376,11 @@ std::string ApiServer::statusJson() const
                 << "}";
         }
 
-        if (analogue.has_value() && analogue->enabled) {
+        if (analogueVisible) {
             if (wroteReceiver) {
                 out << ",";
             }
-            const auto state = !analogue->present ? "fault" : analogue->locked ? "lockedAnalogue" : analogue->ready ? "idle" : "fault";
-            out << "{"
-                << "\"id\":" << config.analogue.capture.receiver.value << ","
-                << "\"name\":" << jsonString(config.analogue.capture.label.empty() ? "Analogue" : config.analogue.capture.label) << ","
-                << "\"type\":\"analogue\","
-                << "\"deviceId\":" << jsonString(config.analogue.capture.deviceId) << ","
-                << "\"state\":" << jsonString(state) << ","
-                << "\"target\":null,"
-                << "\"merDb\":null,"
-                << "\"dNumberDb\":null,"
-                << "\"serviceName\":" << jsonString(config.analogue.capture.label.empty() ? "Analogue" : config.analogue.capture.label) << ","
-                << "\"modulation\":\"SD analogue\","
-                << "\"transportPackets\":0,"
-                << "\"continuityErrors\":0,"
-                << "\"updatedMsAgo\":" << updatedMsAgo(analogue->updatedAt) << ","
-                << "\"present\":" << (analogue->present ? "true" : "false") << ","
-                << "\"detected\":" << (analogue->present ? "true" : "false") << ","
-                << "\"ready\":" << (analogue->ready ? "true" : "false") << ","
-                << "\"locked\":" << (analogue->locked ? "true" : "false") << ","
-                << "\"rawLock\":" << static_cast<int>(analogue->rawLock) << ","
-                << "\"cameraRunning\":" << (analogue->cameraRunning ? "true" : "false") << ","
-                << "\"source\":" << jsonString(analogue->activeSource.empty() ? analogue->selectedSource : analogue->activeSource) << ","
-                << "\"firmwareVersion\":" << jsonString(analogue->firmwareVersion) << ","
-                << "\"hardwareId\":" << jsonString(analogue->hardwareId) << ","
-                << "\"error\":" << (analogue->error.has_value() ? jsonString(*analogue->error) : "null")
-                << "}";
+            writeAnalogueReceiver();
         }
         out << "]";
     }
@@ -1027,6 +1472,11 @@ std::string ApiServer::statusJson() const
         << "\"startTime\":" << jsonString(config.beaconSchedule.startTime) << ","
         << "\"endTime\":" << jsonString(config.beaconSchedule.endTime)
         << "}";
+    out << ",\"preview\":{"
+        << "\"requested\":" << (previewRequested ? "true" : "false") << ","
+        << "\"active\":" << (previewActive ? "true" : "false")
+        << "}";
+    out << ",\"fallbackVideo\":" << (fallbackVideoStatus.has_value() ? *fallbackVideoStatus : "null");
     out << ",\"pluto\":";
     if (pluto.has_value()) {
         out << "{"

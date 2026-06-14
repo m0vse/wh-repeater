@@ -43,12 +43,14 @@ public:
     void setAccessNotice(std::optional<std::string> notice);
     void playFallbackVideo(std::string path);
     void stopFallbackVideo();
+    void seekFallbackVideo(std::chrono::milliseconds position);
     void setPreviewEnabled(bool enabled);
     void tick(std::chrono::steady_clock::time_point now);
     void write(std::span<const std::byte> packet) override;
 
     [[nodiscard]] MediaPipelineMode mode() const;
     [[nodiscard]] std::optional<std::string> streamInfo() const;
+    [[nodiscard]] std::optional<std::string> fallbackVideoStatus() const;
 
 private:
     void ensureRunning();
@@ -66,6 +68,7 @@ private:
     bool previewEnabled_{false};
     std::optional<std::string> accessNotice_;
     std::optional<std::string> fallbackVideoPath_;
+    std::optional<std::chrono::milliseconds> fallbackVideoSeek_;
     MediaPipelineMode mode_{MediaPipelineMode::idle};
     int socket_{-1};
     int childPid_{-1};
@@ -75,6 +78,7 @@ private:
     std::optional<std::vector<std::byte>> lastNoticePayload_;
     std::optional<std::vector<std::byte>> lastPreviewPayload_;
     std::optional<std::string> streamInfo_;
+    std::optional<std::string> fallbackVideoStatus_;
 };
 
 } // namespace whrepeater

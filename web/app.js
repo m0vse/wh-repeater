@@ -21,6 +21,7 @@ const state = {
   status: null,
   dirty: false,
   saveMessageTimer: null,
+  previewActive: false,
 };
 
 const el = {
@@ -32,6 +33,8 @@ const el = {
   refresh: document.querySelector("#refresh"),
   save: document.querySelector("#save"),
   serviceRestart: document.querySelector("#service-restart"),
+  piServiceRestart: document.querySelector("#pi-service-restart"),
+  previewToggle: document.querySelector("#preview-toggle"),
   addReceiver: document.querySelector("#add-receiver"),
   statusInterval: document.querySelector("#status-interval"),
   minimumMer: document.querySelector("#minimum-mer"),
@@ -56,6 +59,7 @@ const el = {
   muxRate: document.querySelector("#mux-rate"),
   videoBitrate: document.querySelector("#video-bitrate"),
   audioBitrate: document.querySelector("#audio-bitrate"),
+  outputAudioChannels: document.querySelector("#output-audio-channels"),
   mediaBackend: document.querySelector("#media-backend"),
   tsGatewayAddress: document.querySelector("#ts-gateway-address"),
   tsGatewayPort: document.querySelector("#ts-gateway-port"),
@@ -87,6 +91,9 @@ const el = {
   fallbackVideoSelect: document.querySelector("#fallback-video-select"),
   fallbackPlayVideo: document.querySelector("#fallback-play-video"),
   fallbackStopVideo: document.querySelector("#fallback-stop-video"),
+  fallbackVideoStatus: document.querySelector("#fallback-video-status"),
+  fallbackSeekTimecode: document.querySelector("#fallback-seek-timecode"),
+  fallbackSeekVideo: document.querySelector("#fallback-seek-video"),
   rtmpEnabled: document.querySelector("#rtmp-enabled"),
   rtmpUrl: document.querySelector("#rtmp-url"),
   beaconScheduleEnabled: document.querySelector("#beacon-schedule-enabled"),
@@ -176,8 +183,22 @@ function stateBadge(status) {
   return `<span class="badge ${locked ? "locked" : ""}">${status || "idle"}</span>`;
 }
 
+function receiverVisibleInStatus(receiver) {
+  if (receiver.enabled === false) {
+    return false;
+  }
+  if (!state.config) {
+    return true;
+  }
+  if (receiver.type === "analogue") {
+    return state.config.analogue?.capture?.enabled ?? false;
+  }
+  const configured = (state.config.receivers || []).find((item) => Number(item.id) === Number(receiver.id));
+  return configured ? configured.enabled !== false : true;
+}
+
 function renderStatus() {
-  const statuses = state.status?.receivers || [];
+  const statuses = (state.status?.receivers || []).filter(receiverVisibleInStatus);
   const activeReceiver = state.status?.activeReceiver;
 
   el.statusGrid.innerHTML = "";
@@ -398,6 +419,7 @@ function fillConfigForm() {
   el.muxRate.value = config.pluto?.muxRateKbps ?? 1200;
   el.videoBitrate.value = config.pluto?.videoBitrateKbps ?? 900;
   el.audioBitrate.value = config.pluto?.audioBitrateKbps ?? 96;
+  el.outputAudioChannels.value = String(config.pluto?.outputAudioChannels ?? 2);
   el.mediaBackend.value = config.media?.backend ?? "ffmpeg";
   el.tsGatewayAddress.value = config.tsGateway?.address ?? "127.0.0.1";
   el.tsGatewayPort.value = config.tsGateway?.port ?? 5000;
@@ -572,6 +594,7 @@ function readConfigForm() {
       muxRateKbps: numberValue(el.muxRate, 1200),
       videoBitrateKbps: numberValue(el.videoBitrate, 900),
       audioBitrateKbps: numberValue(el.audioBitrate, 96),
+      outputAudioChannels: Math.max(1, Math.min(2, numberValue(el.outputAudioChannels, 2))),
       outputWidth: clampedEvenValue(el.outputWidth, 1280, 320, 1920),
       outputHeight: clampedEvenValue(el.outputHeight, 720, 240, 1080),
       outputFrameRate: Math.max(1, Math.min(50, numberValue(el.outputFrameRate, 25))),
@@ -713,13 +736,61 @@ function configMatches(left, right) {
   return JSON.stringify(comparableConfig(left)) === JSON.stringify(comparableConfig(right));
 }
 
+function formatTimecodeMs(milliseconds) {
+  if (!Number.isFinite(Number(milliseconds))) {
+    return "--:--:--.---";
+  }
+  let totalMs = Math.max(0, Math.round(Number(milliseconds)));
+  const hours = Math.floor(totalMs / 3600000);
+  totalMs %= 3600000;
+  const minutes = Math.floor(totalMs / 60000);
+  totalMs %= 60000;
+  const seconds = Math.floor(totalMs / 1000);
+  const millis = totalMs % 1000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+}
+
+function renderFallbackVideoStatus() {
+  const status = state.status?.fallbackVideo;
+  const running = Boolean(status?.playing);
+  if (el.fallbackSeekVideo) {
+    el.fallbackSeekVideo.disabled = !running;
+  }
+  if (!el.fallbackVideoStatus) {
+    return;
+  }
+  if (!running) {
+    el.fallbackVideoStatus.textContent = "No fallback video running";
+    return;
+  }
+  const current = status.timecode || formatTimecodeMs(status.positionMs);
+  const duration = status.durationTimecode || (status.durationMs ? formatTimecodeMs(status.durationMs) : "--:--:--.---");
+  const name = status.name || "Fallback video";
+  el.fallbackVideoStatus.textContent = `${name}  ${current} / ${duration}`;
+}
+
 async function loadStatus() {
   const response = await fetch("/api/status", { cache: "no-store" });
   if (!response.ok) {
     throw new Error(`status ${response.status}`);
   }
   state.status = await response.json();
+  if (state.status.preview) {
+    state.previewActive = Boolean(state.status.preview.active);
+    updatePreviewButton();
+  }
   renderStatus();
+  renderFallbackVideoStatus();
+}
+
+async function loadPreviewStatus() {
+  const response = await fetch("/api/preview/status", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`preview ${response.status}`);
+  }
+  const body = await response.json();
+  state.previewActive = Boolean(body.active);
+  updatePreviewButton();
 }
 
 async function loadConfig() {
@@ -730,6 +801,9 @@ async function loadConfig() {
   state.config = await response.json();
   if (!state.dirty) {
     fillConfigForm();
+  }
+  if (state.status) {
+    renderStatus();
   }
 }
 
@@ -790,7 +864,7 @@ async function loadFallbackVideos() {
 
 async function refreshAll() {
   try {
-    await Promise.all([loadStatus(), loadConfig()]);
+    await Promise.all([loadStatus(), loadConfig(), loadPreviewStatus()]);
     await loadFallbackVideos();
     setMessage("Connected");
   } catch (error) {
@@ -859,6 +933,28 @@ async function stopFallbackVideo() {
   await loadStatus();
 }
 
+async function seekFallbackVideo() {
+  const timecode = el.fallbackSeekTimecode?.value.trim() ?? "";
+  if (!timecode) {
+    throw new Error("enter a timecode");
+  }
+  const response = await fetch("/api/fallback/seek", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ timecode }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
+  const body = await response.json().catch(() => ({}));
+  if (body.timecode && el.fallbackSeekTimecode) {
+    el.fallbackSeekTimecode.value = body.timecode;
+  }
+  setSaveMessage("Fallback video seek accepted");
+  await loadStatus();
+}
+
 async function requestServiceAction(action) {
   const response = await fetch(`/api/service/${action}`, {
     method: "POST",
@@ -876,6 +972,43 @@ async function requestServiceAction(action) {
   await loadStatus();
 }
 
+async function requestPiServiceRestart() {
+  const response = await fetch("/api/pi/service/restart", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
+  setSaveMessage("Pi service restart requested");
+  await loadStatus();
+}
+
+async function requestPreviewAction(action) {
+  const response = await fetch(`/api/preview/service/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
+  setSaveMessage(`Preview ${action} requested`);
+  state.previewActive = action === "start";
+  updatePreviewButton();
+  await delay(500);
+  await loadPreviewStatus();
+  await loadStatus();
+}
+
+function updatePreviewButton() {
+  if (!el.previewToggle) {
+    return;
+  }
+  el.previewToggle.textContent = state.previewActive ? "Stop Preview" : "Start Preview";
+}
+
 el.refresh.addEventListener("click", refreshAll);
 el.save.addEventListener("click", () => {
   saveConfig().catch((error) => setSaveMessage(`Save failed: ${error.message}`, false));
@@ -890,6 +1023,20 @@ if (el.fallbackStopVideo) {
     stopFallbackVideo().catch((error) => setSaveMessage(`Stop fallback video failed: ${error.message}`, false));
   });
 }
+if (el.fallbackSeekVideo) {
+  el.fallbackSeekVideo.disabled = true;
+  el.fallbackSeekVideo.addEventListener("click", () => {
+    seekFallbackVideo().catch((error) => setSaveMessage(`Seek fallback video failed: ${error.message}`, false));
+  });
+}
+if (el.fallbackSeekTimecode) {
+  el.fallbackSeekTimecode.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      seekFallbackVideo().catch((error) => setSaveMessage(`Seek fallback video failed: ${error.message}`, false));
+    }
+  });
+}
 if (el.fallbackVideoDirectory) {
   el.fallbackVideoDirectory.addEventListener("change", () => {
     loadFallbackVideos().catch((error) => setSaveMessage(`Video list failed: ${error.message}`, false));
@@ -897,10 +1044,25 @@ if (el.fallbackVideoDirectory) {
 }
 if (el.serviceRestart) {
   el.serviceRestart.addEventListener("click", () => {
-    if (!window.confirm("Restart wh-repeater service now?")) {
+    if (!window.confirm("Restart the PC gateway service now?")) {
       return;
     }
     requestServiceAction("restart").catch((error) => setSaveMessage(`Restart failed: ${error.message}`, false));
+  });
+}
+if (el.piServiceRestart) {
+  el.piServiceRestart.addEventListener("click", () => {
+    if (!window.confirm("Restart the Pi gateway service now?")) {
+      return;
+    }
+    requestPiServiceRestart().catch((error) => setSaveMessage(`Pi restart failed: ${error.message}`, false));
+  });
+}
+if (el.previewToggle) {
+  updatePreviewButton();
+  el.previewToggle.addEventListener("click", () => {
+    const action = state.previewActive ? "stop" : "start";
+    requestPreviewAction(action).catch((error) => setSaveMessage(`Preview ${action} failed: ${error.message}`, false));
   });
 }
 if (el.addReceiver) {
@@ -933,6 +1095,7 @@ for (const input of [
   el.plutoFecMode,
   el.plutoConstellation,
   el.audioBitrate,
+  el.outputAudioChannels,
   el.mediaBackend,
   el.tsGatewayAddress,
   el.tsGatewayPort,

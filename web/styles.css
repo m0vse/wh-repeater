@@ -263,6 +263,12 @@ main {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.fallback-video-status {
+  color: #3f4a57;
+  font-size: 0.92rem;
+  min-height: 1.3rem;
+}
+
 .config-sections {
   display: grid;
   gap: 18px;

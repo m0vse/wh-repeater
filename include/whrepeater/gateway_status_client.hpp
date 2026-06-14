@@ -29,6 +29,7 @@ public:
     [[nodiscard]] std::optional<std::string> poll(std::chrono::steady_clock::time_point now);
     [[nodiscard]] std::optional<std::string> fetchConfig();
     [[nodiscard]] bool putConfig(const RepeaterConfig& config);
+    [[nodiscard]] bool restartService();
     [[nodiscard]] const std::optional<std::string>& lastError() const;
 
 private:

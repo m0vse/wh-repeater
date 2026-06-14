@@ -20,7 +20,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WH Repeater</title>
-  <link rel="stylesheet" href="/styles.css?v=20260614-clean-ui">
+  <link rel="stylesheet" href="/styles.css?v=20260614-timecode">
 </head>
 <body>
   <header class="topbar">
@@ -31,7 +31,9 @@
     <div class="header-status" id="save-state" aria-live="polite"></div>
     <div class="actions">
       <button id="refresh" type="button">Refresh</button>
-      <button id="service-restart" type="button">Restart</button>
+      <button id="preview-toggle" type="button">Start Preview</button>
+      <button id="pi-service-restart" type="button">Restart Pi</button>
+      <button id="service-restart" type="button">Restart PC</button>
       <button id="save" type="button" class="primary">Save Config</button>
     </div>
   </header>
@@ -262,6 +264,13 @@
                   <input id="audio-bitrate" type="number" min="1">
                 </label>
                 <label>
+                  Audio channels
+                  <select id="output-audio-channels">
+                    <option value="2">Stereo</option>
+                    <option value="1">Mono</option>
+                  </select>
+                </label>
+                <label>
                   Media backend
                   <select id="media-backend">
                     <option value="ffmpeg">FFmpeg</option>
@@ -342,6 +351,14 @@
                 <div class="actions wide">
                   <button id="fallback-play-video" type="button">Play selected fallback video</button>
                   <button id="fallback-stop-video" type="button">Stop fallback video</button>
+                </div>
+                <div class="wide fallback-video-status" id="fallback-video-status">No fallback video running</div>
+                <label>
+                  Seek timecode
+                  <input id="fallback-seek-timecode" type="text" placeholder="00:00:00.000">
+                </label>
+                <div class="actions">
+                  <button id="fallback-seek-video" type="button">Seek fallback video</button>
                 </div>
               </div>
             </div>
@@ -559,6 +576,6 @@
     </div>
   </template>
 
-  <script src="/app.js?v=20260614-clean-ui" defer></script>
+  <script src="/app.js?v=20260614-timecode" defer></script>
 </body>
 </html>

@@ -1032,8 +1032,14 @@ int Daemon::runPiGatewayOrLocal()
         if (api.takePendingFallbackVideoStop() && media) {
             media->stopFallbackVideo();
         }
+        if (auto fallbackVideoSeek = api.takePendingFallbackVideoSeek(); fallbackVideoSeek.has_value() && media) {
+            media->seekFallbackVideo(*fallbackVideoSeek);
+        }
+        api.updateFallbackVideoStatus(media ? media->fallbackVideoStatus() : std::nullopt);
 #else
         (void)api.takePendingFallbackVideoStop();
+        (void)api.takePendingFallbackVideoSeek();
+        api.updateFallbackVideoStatus(std::nullopt);
 #endif
 
         const auto now = std::chrono::steady_clock::now();
@@ -1206,6 +1212,7 @@ int Daemon::runPcGateway()
     bool previewRequestedByApi{};
     std::chrono::steady_clock::time_point accessNoticeUntil{};
     std::chrono::steady_clock::time_point lastGatewayStatusWarning{};
+    std::optional<std::chrono::steady_clock::time_point> analogueLockedSince;
     auto nextHousekeepingAt = std::chrono::steady_clock::now();
 
     api.updateConfig(config_);
@@ -1289,16 +1296,38 @@ int Daemon::runPcGateway()
         if (api.takePendingFallbackVideoStop()) {
             media.stopFallbackVideo();
         }
+        if (auto fallbackVideoSeek = api.takePendingFallbackVideoSeek(); fallbackVideoSeek.has_value()) {
+            media.seekFallbackVideo(*fallbackVideoSeek);
+        }
+        api.updateFallbackVideoStatus(media.fallbackVideoStatus());
 
         if (auto previewEnabled = api.takePendingPreviewEnabled(); previewEnabled.has_value()) {
             previewRequestedByApi = *previewEnabled;
         }
-        media.setPreviewEnabled(previewRequestedByApi || previewReceiverRunning());
+        const auto previewActive = previewRequestedByApi || previewReceiverRunning();
+        media.setPreviewEnabled(previewActive);
+        api.updatePreviewStatus(previewRequestedByApi, previewActive);
 
         const auto now = loopNow;
         const auto beaconAllowed = beaconScheduleActive(config_.beaconSchedule);
         api.updateBeaconSchedule(beaconAllowed);
         api.updatePlutoStatus(plutoStatus.snapshot());
+        const auto analogueStatus = config_.analogue.capture.enabled
+            ? captureAnalogueStatus(config_)
+            : disabledAnalogueStatus(now);
+        auto gatedAnalogueStatus = analogueStatus;
+        if (gatedAnalogueStatus.locked) {
+            if (!analogueLockedSince.has_value()) {
+                analogueLockedSince = now;
+            }
+            if (now - *analogueLockedSince < kAnalogueSyncDebounce) {
+                gatedAnalogueStatus.locked = false;
+                gatedAnalogueStatus.error = "Analogue sync waiting for stable lock";
+            }
+        } else {
+            analogueLockedSince.reset();
+        }
+        api.updateAnalogueStatus(gatedAnalogueStatus);
         if (gatewayStatus.due(now)) {
             if (auto remoteStatus = gatewayStatus.poll(now); remoteStatus.has_value()) {
                 latestRemoteGatewayStatus = *remoteStatus;
@@ -1343,18 +1372,25 @@ int Daemon::runPcGateway()
                 }
             }
             pcWasActive = true;
-        } else if (pcWasActive && pcSessionInput.has_value()) {
-            accessNotice = accessMessage(config_,
-                                         *pcSessionInput,
-                                         {},
-                                         true,
-                                         now - pcSessionStartedAt,
-                                         pcSessionServiceName,
-                                         pcSessionVideoFormat);
-            accessNoticeUntil = now + kPcAccessNoticeHold;
-            pcWasActive = false;
-        } else if (accessNotice.has_value() && now >= accessNoticeUntil) {
-            accessNotice.reset();
+        } else {
+            if (pcWasActive && pcSessionInput.has_value()) {
+                accessNotice = accessMessage(config_,
+                                             *pcSessionInput,
+                                             {},
+                                             true,
+                                             now - pcSessionStartedAt,
+                                             pcSessionServiceName,
+                                             pcSessionVideoFormat);
+                accessNoticeUntil = now + kPcAccessNoticeHold;
+                pcWasActive = false;
+            }
+            if (auto analogueActive = analogueActiveInput(config_, gatedAnalogueStatus); analogueActive.has_value()) {
+                active = analogueActive;
+                mediaActive = analogueActive;
+                accessNotice = accessMessage(config_, *analogueActive);
+            } else if (accessNotice.has_value() && now >= accessNoticeUntil) {
+                accessNotice.reset();
+            }
         }
 
         media.select(mediaActive);

@@ -50,6 +50,8 @@ enum class MediaMessage : std::uint32_t {
     transportStream = 8,
     preview = 9,
     streamInfo = 10,
+    seekFallbackVideo = 11,
+    fallbackVideoStatus = 12,
 };
 
 struct MessageHeader {
@@ -152,6 +154,13 @@ std::vector<std::byte> stringPayload(std::string_view value)
 {
     std::vector<std::byte> payload;
     appendString(payload, value);
+    return payload;
+}
+
+std::vector<std::byte> int64Payload(std::int64_t value)
+{
+    std::vector<std::byte> payload;
+    appendPod(payload, value);
     return payload;
 }
 
@@ -263,6 +272,12 @@ std::string readStringPayload(std::span<const std::byte> payload)
     return reader.readString();
 }
 
+std::int64_t readInt64Payload(std::span<const std::byte> payload)
+{
+    PayloadReader reader{payload};
+    return reader.readPod<std::int64_t>();
+}
+
 void sendChildMessage(int socket, MediaMessage type, std::span<const std::byte> payload)
 {
     std::vector<std::byte> message;
@@ -356,6 +371,9 @@ void runMediaChild(RepeaterConfig config, int socket)
         case MediaMessage::stopFallbackVideo:
             media.stopFallbackVideo();
             break;
+        case MediaMessage::seekFallbackVideo:
+            media.seekFallbackVideo(std::chrono::milliseconds{readInt64Payload(payload)});
+            break;
         case MediaMessage::tick:
             media.tick(std::chrono::steady_clock::now());
             break;
@@ -366,10 +384,14 @@ void runMediaChild(RepeaterConfig config, int socket)
             media.setPreviewEnabled(readBoolPayload(payload));
             break;
         case MediaMessage::streamInfo:
+        case MediaMessage::fallbackVideoStatus:
             break;
         }
         if (auto streamInfo = media.takeStreamInfoUpdate(); streamInfo.has_value()) {
             sendChildString(socket, MediaMessage::streamInfo, *streamInfo);
+        }
+        if (auto fallbackStatus = media.takeFallbackVideoStatusUpdate(); fallbackStatus.has_value()) {
+            sendChildString(socket, MediaMessage::fallbackVideoStatus, *fallbackStatus);
         }
     }
 }
@@ -426,6 +448,8 @@ void MediaProcess::setAccessNotice(std::optional<std::string> notice)
 void MediaProcess::playFallbackVideo(std::string path)
 {
     fallbackVideoPath_ = path;
+    fallbackVideoSeek_.reset();
+    fallbackVideoStatus_.reset();
     mode_ = MediaPipelineMode::fallbackVideo;
     (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::playFallbackVideo), stringPayload(path), true);
 }
@@ -433,8 +457,18 @@ void MediaProcess::playFallbackVideo(std::string path)
 void MediaProcess::stopFallbackVideo()
 {
     fallbackVideoPath_.reset();
+    fallbackVideoSeek_.reset();
+    fallbackVideoStatus_.reset();
     mode_ = MediaPipelineMode::fallback;
     (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::stopFallbackVideo), {}, true);
+}
+
+void MediaProcess::seekFallbackVideo(std::chrono::milliseconds position)
+{
+    fallbackVideoSeek_ = std::max(std::chrono::milliseconds{0}, position);
+    (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::seekFallbackVideo),
+                      int64Payload(fallbackVideoSeek_->count()),
+                      true);
 }
 
 void MediaProcess::setPreviewEnabled(bool enabled)
@@ -491,6 +525,11 @@ MediaPipelineMode MediaProcess::mode() const
 std::optional<std::string> MediaProcess::streamInfo() const
 {
     return streamInfo_;
+}
+
+std::optional<std::string> MediaProcess::fallbackVideoStatus() const
+{
+    return fallbackVideoStatus_;
 }
 
 void MediaProcess::ensureRunning()
@@ -674,6 +713,8 @@ void MediaProcess::drainChildMessages()
         const std::span<const std::byte> payload{buffer.data() + sizeof(MessageHeader), payloadSize};
         if (static_cast<MediaMessage>(header.type) == MediaMessage::streamInfo) {
             streamInfo_ = readStringPayload(payload);
+        } else if (static_cast<MediaMessage>(header.type) == MediaMessage::fallbackVideoStatus) {
+            fallbackVideoStatus_ = readStringPayload(payload);
         }
     }
 }
@@ -716,6 +757,11 @@ void MediaProcess::replayState()
     }
     if (fallbackVideoPath_.has_value()) {
         (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::playFallbackVideo), stringPayload(*fallbackVideoPath_), true);
+        if (fallbackVideoSeek_.has_value()) {
+            (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::seekFallbackVideo),
+                              int64Payload(fallbackVideoSeek_->count()),
+                              true);
+        }
     }
 }
 
