@@ -134,18 +134,6 @@ int h264AvProfile(const RepeaterConfig& config)
     return FF_PROFILE_H264_MAIN;
 }
 
-int h264V4l2ProfileControl(const RepeaterConfig& config)
-{
-    const auto profile = h264ProfileName(config);
-    if (profile == "baseline") {
-        return 0;
-    }
-    if (profile == "high") {
-        return 4;
-    }
-    return 2;
-}
-
 int h264AvLevel(const RepeaterConfig& config)
 {
     const auto level = h264LevelName(config);
@@ -156,18 +144,6 @@ int h264AvLevel(const RepeaterConfig& config)
         return 31;
     }
     return 40;
-}
-
-int h264V4l2LevelControl(const RepeaterConfig& config)
-{
-    const auto level = h264LevelName(config);
-    if (level == "3") {
-        return 8;
-    }
-    if (level == "3.1") {
-        return 9;
-    }
-    return 11;
 }
 
 int fallbackVideoBitrateKbps(const RepeaterConfig& config)
@@ -1002,17 +978,10 @@ void configureEncoderContext(AVCodecContext& codec,
     }
 }
 
-std::string h264EncoderName(const RepeaterConfig& config)
-{
-    return config.mode == "pc-gateway" ? "libx264" : "h264_v4l2m2m";
-}
-
 std::vector<std::string> h264EncoderCandidates(const RepeaterConfig& config)
 {
-    if (config.mode == "pc-gateway") {
-        return {"h264_vaapi", "libx264"};
-    }
-    return {h264EncoderName(config)};
+    (void)config;
+    return {"h264_vaapi", "libx264"};
 }
 
 AVBufferRef* createVaapiDevice()
@@ -1073,20 +1042,6 @@ bool encoderOpenProbe(std::string_view encoderName,
                       int videoBitrateKbps,
                       std::chrono::milliseconds timeout)
 {
-    if (encoderName == "h264_v4l2m2m") {
-        static std::mutex probeMutex;
-        static std::optional<bool> cachedResult;
-        std::lock_guard lock{probeMutex};
-        if (cachedResult.has_value()) {
-            return *cachedResult;
-        }
-        cachedResult = encoderOpenProbe("h264_v4l2m2m-once", format, config, width, height, frameRate, videoBitrateKbps, timeout);
-        return *cachedResult;
-    }
-    if (encoderName == "h264_v4l2m2m-once") {
-        encoderName = "h264_v4l2m2m";
-    }
-
     const auto* encoder = avcodec_find_encoder_by_name(std::string{encoderName}.c_str());
     if (encoder == nullptr) {
         return false;
@@ -1148,8 +1103,6 @@ void configureEncoderOptions(AVDictionary*& options, std::string_view encoderNam
     if (encoderName == "libx264") {
         av_dict_set(&options, "preset", "veryfast", 0);
         av_dict_set(&options, "tune", "zerolatency", 0);
-    } else if (encoderName == "h264_v4l2m2m") {
-        av_dict_set(&options, "repeat_sequence_header", "1", 0);
     } else if (encoderName == "h264_qsv") {
         av_dict_set(&options, "preset", "veryfast", 0);
         av_dict_set(&options, "forced_idr", "1", 0);
@@ -1289,111 +1242,12 @@ bool gstElementAvailable(std::string_view name)
     return true;
 }
 
-bool gstV4l2H264EncoderUsable(const RepeaterConfig& config)
-{
-    static std::optional<bool> usable;
-    if (usable.has_value()) {
-        return *usable;
-    }
-    if (!gstElementAvailable("v4l2h264enc")) {
-        usable = false;
-        return *usable;
-    }
-
-    std::ostringstream selfTestPipeline;
-    selfTestPipeline
-        << "videotestsrc num-buffers=2 is-live=false "
-        << "! video/x-raw,format=I420,width=" << outputWidth(config)
-        << ",height=" << outputHeight(config)
-        << ",framerate=" << outputFrameRate(config) << "/1 "
-        << "! v4l2h264enc extra-controls="
-        << gstQuoted("controls,h264_profile=" + std::to_string(h264V4l2ProfileControl(config))
-                     + ",h264_level=" + std::to_string(h264V4l2LevelControl(config)))
-        << " ! video/x-h264,level=(string)" << h264LevelName(config)
-        << ",profile=(string)" << h264ProfileName(config) << " "
-        << "! h264parse "
-        << "! fakesink sync=false";
-    const auto pipelineText = selfTestPipeline.str();
-    GError* rawError{};
-    GstElement* rawPipeline = gst_parse_launch(pipelineText.c_str(), &rawError);
-    if (rawError != nullptr || rawPipeline == nullptr) {
-        if (rawError != nullptr) {
-            g_error_free(rawError);
-        }
-        if (rawPipeline != nullptr) {
-            gst_element_set_state(rawPipeline, GST_STATE_NULL);
-            gst_object_unref(rawPipeline);
-        }
-        usable = false;
-        return *usable;
-    }
-    GstElementPtr pipeline{rawPipeline};
-    GstBus* rawBus = gst_element_get_bus(pipeline.get());
-    if (rawBus == nullptr) {
-        usable = false;
-        return *usable;
-    }
-    GstObjectPtr busObject{GST_OBJECT(rawBus)};
-
-    if (gst_element_set_state(pipeline.get(), GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
-        usable = false;
-        return *usable;
-    }
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
-    usable = false;
-    while (std::chrono::steady_clock::now() < deadline) {
-        GstMessagePtr message{gst_bus_timed_pop_filtered(rawBus,
-                                                         200 * GST_MSECOND,
-                                                         static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS))};
-        if (!message) {
-            continue;
-        }
-        if (GST_MESSAGE_TYPE(message.get()) == GST_MESSAGE_EOS) {
-            usable = true;
-            break;
-        }
-        if (GST_MESSAGE_TYPE(message.get()) == GST_MESSAGE_ERROR) {
-            GError* error{};
-            gchar* debug{};
-            gst_message_parse_error(message.get(), &error, &debug);
-            std::cerr << "wh-repeater: GStreamer v4l2h264enc self-test failed: "
-                      << (error != nullptr && error->message != nullptr ? error->message : "unknown error");
-            if (debug != nullptr && debug[0] != '\0') {
-                std::cerr << " (" << debug << ")";
-            }
-            std::cerr << '\n';
-            if (error != nullptr) {
-                g_error_free(error);
-            }
-            g_free(debug);
-            break;
-        }
-    }
-
-    if (!*usable) {
-        std::cerr << "wh-repeater: GStreamer v4l2h264enc is registered but not usable; using OpenH264 software encoder\n";
-    }
-    return *usable;
-}
-
 std::string gstH264EncoderElement(const RepeaterConfig& config, int frameRate, int videoBitrate)
 {
-    const auto gop = std::max(1, frameRate * 2);
-    if (gstV4l2H264EncoderUsable(config)) {
-        std::ostringstream encoder;
-        encoder
-            << "v4l2h264enc extra-controls="
-            << gstQuoted("controls,video_bitrate_mode=1,video_bitrate=" + std::to_string(videoBitrate)
-                         + ",h264_i_frame_period=" + std::to_string(gop)
-                         + ",repeat_sequence_header=1,h264_profile=" + std::to_string(h264V4l2ProfileControl(config))
-                         + ",h264_level=" + std::to_string(h264V4l2LevelControl(config)))
-            << " ! video/x-h264,level=(string)" << h264LevelName(config)
-            << ",profile=(string)" << h264ProfileName(config) << " ";
-        return encoder.str();
-    }
-
-    throw std::runtime_error{"GStreamer hardware H.264 encoder is not usable; software encode is disabled"};
+    (void)config;
+    (void)frameRate;
+    (void)videoBitrate;
+    throw std::runtime_error{"GStreamer H.264 output is disabled after removal of legacy V4L2 codec support"};
 }
 
 std::string gstRawOutputPipeline(const RepeaterConfig& config)
@@ -1984,105 +1838,7 @@ std::string codecDescription(AVCodecID codecId)
 
 const AVCodec* findVideoDecoder(AVCodecID codecId)
 {
-    if (codecId == AV_CODEC_ID_H264) {
-        if (const auto* decoder = avcodec_find_decoder_by_name("h264_v4l2m2m"); decoder != nullptr) {
-            return decoder;
-        }
-    }
-    if (codecId == AV_CODEC_ID_HEVC) {
-        if (const auto* decoder = avcodec_find_decoder_by_name("hevc_v4l2m2m"); decoder != nullptr) {
-            return decoder;
-        }
-    }
-    if (codecId == AV_CODEC_ID_MPEG2VIDEO) {
-        if (const auto* decoder = avcodec_find_decoder_by_name("mpeg2_v4l2m2m"); decoder != nullptr) {
-            return decoder;
-        }
-    }
     return avcodec_find_decoder(codecId);
-}
-
-std::string pixelFormatDescription(int format)
-{
-    if (format == AV_PIX_FMT_NONE || format < 0) {
-        return "unknown pixel format";
-    }
-    if (const auto* name = av_get_pix_fmt_name(static_cast<AVPixelFormat>(format)); name != nullptr) {
-        return name;
-    }
-    return "pixel format " + std::to_string(format);
-}
-
-std::string fieldOrderDescription(AVFieldOrder fieldOrder)
-{
-    switch (fieldOrder) {
-    case AV_FIELD_UNKNOWN: return "unknown";
-    case AV_FIELD_PROGRESSIVE: return "progressive";
-    case AV_FIELD_TT: return "top coded first, top displayed first";
-    case AV_FIELD_BB: return "bottom coded first, bottom displayed first";
-    case AV_FIELD_TB: return "top coded first, bottom displayed first";
-    case AV_FIELD_BT: return "bottom coded first, top displayed first";
-    default: return "field order " + std::to_string(static_cast<int>(fieldOrder));
-    }
-}
-
-bool fieldOrderIsSafeForFallbackHardwareDecode(AVFieldOrder fieldOrder)
-{
-    return fieldOrder == AV_FIELD_UNKNOWN || fieldOrder == AV_FIELD_PROGRESSIVE;
-}
-
-struct FallbackHardwareDecodeDecision {
-    const AVCodec* decoder{};
-    std::string reason;
-};
-
-FallbackHardwareDecodeDecision chooseFallbackHardwareDecoder(const RepeaterConfig& config, const AVStream& stream)
-{
-    const auto* parameters = stream.codecpar;
-    if (parameters == nullptr) {
-        return {nullptr, "missing stream parameters"};
-    }
-    if (parameters->codec_id != AV_CODEC_ID_H264) {
-        return {nullptr, "only H.264 fallback videos are eligible"};
-    }
-
-    const auto* decoder = avcodec_find_decoder_by_name("h264_v4l2m2m");
-    if (decoder == nullptr) {
-        return {nullptr, "h264_v4l2m2m decoder is not available"};
-    }
-
-    const auto width = parameters->width;
-    const auto height = parameters->height;
-    if (width <= 0 || height <= 0) {
-        return {nullptr, "unknown video dimensions"};
-    }
-    if (width > outputWidth(config) || height > outputHeight(config)) {
-        return {nullptr, "video is larger than the configured output frame"};
-    }
-
-    if (!fieldOrderIsSafeForFallbackHardwareDecode(parameters->field_order)) {
-        return {nullptr, "interlaced field order " + fieldOrderDescription(parameters->field_order)};
-    }
-
-    const auto format = static_cast<AVPixelFormat>(parameters->format);
-    if (parameters->format >= 0 && format != AV_PIX_FMT_YUV420P && format != AV_PIX_FMT_NV12) {
-        return {nullptr, "unsupported " + pixelFormatDescription(parameters->format)};
-    }
-
-    if (parameters->level > 0 && parameters->level > 42) {
-        return {nullptr, "H.264 level " + std::to_string(parameters->level) + " is above the hardware-decode trial limit"};
-    }
-
-    const auto rate = stream.avg_frame_rate.num > 0 && stream.avg_frame_rate.den > 0
-        ? stream.avg_frame_rate
-        : stream.r_frame_rate;
-    if (rate.num > 0 && rate.den > 0 && av_q2d(rate) > 60.0) {
-        return {nullptr, "frame rate is above 60 fps"};
-    }
-
-    return {decoder, "H.264 " + std::to_string(width) + "x" + std::to_string(height)
-            + ", " + fieldOrderDescription(parameters->field_order)
-            + ", " + pixelFormatDescription(parameters->format)};
 }
 
 int roundedFrameRate(AVRational rate)
@@ -3799,14 +3555,7 @@ private:
                 }
             }
             if (!usingVaapiHardwareDecoder) {
-                const auto decision = chooseFallbackHardwareDecoder(config_, *videoStream);
-                if (decision.decoder != nullptr) {
-                    decoder = decision.decoder;
-                    usingHardwareDecoder = true;
-                    std::cout << "media pipeline fallback hardware decode candidate accepted: " << decision.reason << '\n';
-                } else {
-                    std::cout << "media pipeline fallback hardware decode skipped: " << decision.reason << '\n';
-                }
+                std::cout << "media pipeline fallback hardware decode skipped: VAAPI exact-size H.264 is the only supported hardware file-decode path\n";
             }
         }
 
@@ -4719,9 +4468,7 @@ public:
             throw std::runtime_error{"start GStreamer output pipeline failed"};
         }
 
-        std::cout << "media pipeline using GStreamer "
-                  << (gstV4l2H264EncoderUsable(config_) ? "v4l2h264enc" : "OpenH264")
-                  << " output at "
+        std::cout << "media pipeline using GStreamer output at "
                   << width_ << "x" << height_ << " " << frameRate_ << " fps\n";
         if (config_.streaming.rtmp.enabled && !config_.streaming.rtmp.url.empty()) {
             std::cout << "media pipeline streaming RTMP through GStreamer to "

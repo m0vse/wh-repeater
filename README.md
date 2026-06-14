@@ -23,7 +23,8 @@ This is the first working streaming test build. It can:
 - serve a local REST API on `127.0.0.1:8080`;
 - serve a web management UI through nginx over HTTPS;
 - generate a continuous MPEG-TS media pipeline with blue fallback/status slides;
-- require the Pi hardware H.264 encoder for all output video encoding;
+- use PC-side H.264 encoding for generated/output video in `pc-gateway` mode,
+  preferring VAAPI hardware encode where available;
 - stream the generated output to an optional RTMP server;
 - run in `ts-gateway` mode, where the Pi scans/selects the Winterhill receiver
   and forwards the selected raw MPEG-TS to a configured PC over UDP as 1316-byte
@@ -31,7 +32,7 @@ This is the first working streaming test build. It can:
 - run in `pc-gateway` mode on that PC, where this daemon receives the Pi UDP
   MPEG-TS and owns decode/transcode, fallback/status generation, RTMP, Pluto,
   and operator-facing output;
-- isolate FFmpeg/V4L2 media handling in a supervised child process so the
+- isolate FFmpeg media handling in a supervised child process so the
   control daemon can restart media output after a media-worker failure;
 - publish PlutoPlus/F5OEO control over MQTT, including TX mute/PTT state;
 - provisionally select the Tezuka DATV MQTT protocol used by 7020/7035
@@ -43,16 +44,18 @@ The media pipeline has a hard fixed-output contract: every source must be
 decoded, scaled, resampled, and transcoded into the configured stream profile so
 RTMP/output video is never interrupted just because the source changes. See
 [`docs/media-stream-contract.md`](docs/media-stream-contract.md).
-Hardware H.264 encode is mandatory for every output path. Software decode may be
-used when hardware decode is unavailable or unsuitable, but software H.264 encode
-must not be used as an automatic fallback.
-The hardware encoder is treated as a protected boundary: only validated
+The split architecture no longer requires Pi-side H.264 encode/decode. PC-side
+media output prefers VAAPI hardware encode where available; software H.264
+encode is retained only as a diagnostic/development fallback on PC test
+hardware. Software decode may be used when hardware decode is unavailable or
+unsuitable.
+The encoder is treated as a protected boundary: only validated
 fixed-format frames with monotonic timestamps may be submitted to it. Bad,
 missing, or stalled source data must be replaced with generated video and
 silence before it reaches the encoder.
 
 Media processing runs in a forked child process supervised by the main daemon.
-The child owns FFmpeg, V4L2 codec devices, Pluto UDP output, and RTMP output.
+The child owns FFmpeg media processing, Pluto UDP output, and RTMP output.
 The parent keeps API/config/scanning/PTT state alive, sends control and selected
 TS packets over a local Unix socket, and restarts the media child if it exits.
 
@@ -326,7 +329,7 @@ and uses the serial-scoped `cmd/pluto/<device-id>/...` and
 - `src/ts_gateway_sink.cpp`: raw 188-byte MPEG-TS UDP gateway output.
 - `tools/ts_gateway_inspect.cpp`: standalone UDP TS gateway validation tool.
 - `src/media_process.cpp`: parent-side media child supervision and IPC.
-- `src/media_pipeline.cpp`: child-side FFmpeg/V4L2 media generation,
+- `src/media_pipeline.cpp`: child-side FFmpeg media generation,
   encoding, RTMP output, and fallback rendering.
 - `src/api_server.cpp`: localhost REST API.
 - `web/`: static browser management UI.

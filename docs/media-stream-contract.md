@@ -17,10 +17,11 @@
 
 # Media Stream Contract
 
-This contract applies to `local-transcode` mode. In `ts-gateway` mode the Pi
-bypasses the media worker entirely and forwards selected raw 188-byte MPEG-TS
-packets over UDP; FFmpeg, GStreamer, and H.264 codec availability must not be
-required for that gateway path.
+This contract applies to media-producing modes such as `pc-gateway` and the
+legacy `local-transcode` path. In `ts-gateway` mode the Pi bypasses the media
+worker entirely and forwards selected raw 188-byte MPEG-TS packets over UDP;
+FFmpeg, GStreamer, and H.264 codec availability must not be required for that
+gateway path.
 
 The output stream is continuous and fixed-format. Source changes must never
 change the advertised output parameters or interrupt the RTMP/output stream.
@@ -29,16 +30,16 @@ Required invariants:
 
 - The encoded video parameters are owned by the repeater output configuration,
   not by the active input.
-- H.264 output encoding must always use the Raspberry Pi hardware encoder. The
-  daemon must not silently fall back to `libx264`, OpenH264, or any other
-  software H.264 encoder for generated fallback, fallback video playback, live
-  DVB retransmit, analogue capture, Pluto TS output, or RTMP output.
-- If the hardware encoder cannot be opened, the media path must fail loudly and
-  remain supervised/restartable. High-CPU software encode is not an acceptable
-  degraded mode for the installed repeater.
-- Hardware decode is preferred for received or file inputs, but software decode
-  fallback is allowed when hardware decode is unavailable, unsuitable for a
-  specific stream, or less stable on the current Pi stack.
+- PC-side H.264 output should use the configured hardware encoder when
+  available, currently VAAPI on Intel test hardware. Software H.264 encode is
+  acceptable only as a diagnostic/development fallback and must not be re-added
+  as a Pi-side requirement.
+- Legacy Raspberry Pi V4L2 H.264 codec paths are intentionally retired. The Pi
+  `ts-gateway` role must not depend on local H.264 encode/decode devices.
+- Hardware decode is preferred for received or file inputs when it is stable for
+  that source and target hardware. Software decode fallback is allowed when
+  hardware decode is unavailable, unsuitable for a specific stream, or less
+  stable.
 - The configured output width, height, and frame rate define the single video
   profile used by generated fallback, live inputs, Pluto TS output, and RTMP.
 - The configured H.264 profile and level are part of that same output contract.
@@ -75,7 +76,7 @@ Required invariants:
 - During fallback-video file playback, stability and uninterrupted output take
   priority over lowest possible CPU use. Using one hot CPU thread for software
   decode, timestamp pacing, scaling, and audio sync is acceptable if it keeps the
-  hardware encoder and RTMP/output stream stable.
+  encoder and RTMP/output stream stable.
 - Hard rule: fallback-video file playback must be paced against the common
   output muxer PTS for both video and audio. The file reader/decoder may buffer a
   small amount ahead of the output clock to absorb decode jitter, but it must

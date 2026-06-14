@@ -24,8 +24,6 @@ namespace whrepeater {
 struct GStreamerBackendStatus {
     bool built{};
     bool runtimeAvailable{};
-    bool hardwareH264Encoder{};
-    bool hardwareH264Decoder{};
     bool mpegTsMux{};
     bool rtmpSink{};
     std::string detail;
