@@ -7,6 +7,7 @@ Requires=wh-pc-gateway.service
 Type=simple
 Environment=WH_PREVIEW_URL=udp://127.0.0.1:15000
 Environment=WH_PREVIEW_CONNECTOR=DP-1
+ExecStartPre=/bin/sleep 2
 ExecStartPre=-/usr/bin/curl -fsS -X POST http://127.0.0.1:8080/api/preview/start
 ExecStart=/usr/bin/mpv --no-terminal --really-quiet --idle=yes --keep-open=yes --force-window=yes --vo=gpu --gpu-context=drm --drm-connector=${WH_PREVIEW_CONNECTOR} --hwdec=vaapi ${WH_PREVIEW_URL}
 ExecStopPost=-/usr/bin/curl -fsS -X POST http://127.0.0.1:8080/api/preview/stop
