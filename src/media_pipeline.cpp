@@ -19,6 +19,7 @@
 #include "whrepeater/media_pipeline.hpp"
 
 #include "whrepeater/gstreamer_backend.hpp"
+#include "whrepeater/media_timing.hpp"
 
 #include <algorithm>
 #include <array>
@@ -34,6 +35,8 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <functional>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -84,7 +87,6 @@ constexpr int minimumOutputWidth{320};
 constexpr int minimumOutputHeight{240};
 constexpr std::string_view slateFont{"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"};
 constexpr std::string_view clockFont{"/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"};
-constexpr int fallbackAudioSampleRate{48000};
 constexpr auto liveVideoAcquisitionTimeout = std::chrono::seconds{8};
 constexpr double pi{3.14159265358979323846};
 
@@ -100,7 +102,12 @@ int outputHeight(const RepeaterConfig& config)
 
 int outputFrameRate(const RepeaterConfig& config)
 {
-    return std::clamp(static_cast<int>(config.pluto.outputFrameRate), 1, 50);
+    return clampedOutputFrameRate(config.pluto.outputFrameRate);
+}
+
+int outputAudioChannels(const RepeaterConfig& config)
+{
+    return clampedOutputAudioChannels(config.pluto.outputAudioChannels);
 }
 
 std::string h264ProfileName(const RepeaterConfig& config)
@@ -150,6 +157,67 @@ int fallbackVideoBitrateKbps(const RepeaterConfig& config)
 {
     const auto muxBudget = static_cast<int>(config.pluto.muxRateKbps * 6 / 10);
     return std::max(250, std::min(static_cast<int>(config.pluto.videoBitrateKbps), muxBudget));
+}
+
+std::string jsonString(std::string_view value)
+{
+    std::string out;
+    out.reserve(value.size() + 2);
+    out.push_back('"');
+    for (const char ch : value) {
+        const auto byte = static_cast<unsigned char>(ch);
+        switch (ch) {
+        case '"':
+            out += "\\\"";
+            break;
+        case '\\':
+            out += "\\\\";
+            break;
+        case '\b':
+            out += "\\b";
+            break;
+        case '\f':
+            out += "\\f";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        default:
+            if (byte < 0x20) {
+                out += "\\u00";
+                constexpr char hex[] = "0123456789abcdef";
+                out.push_back(hex[(byte >> 4) & 0x0f]);
+                out.push_back(hex[byte & 0x0f]);
+            } else {
+                out.push_back(ch);
+            }
+        }
+    }
+    out.push_back('"');
+    return out;
+}
+
+std::string formatTimecode(std::chrono::milliseconds position)
+{
+    auto totalMs = std::max<std::int64_t>(0, position.count());
+    const auto hours = totalMs / 3'600'000;
+    totalMs %= 3'600'000;
+    const auto minutes = totalMs / 60'000;
+    totalMs %= 60'000;
+    const auto seconds = totalMs / 1000;
+    const auto millis = totalMs % 1000;
+    std::ostringstream out;
+    out << std::setfill('0') << std::setw(2) << hours << ':'
+        << std::setw(2) << minutes << ':'
+        << std::setw(2) << seconds << '.'
+        << std::setw(3) << millis;
+    return out.str();
 }
 
 std::string avError(int error)
@@ -2514,7 +2582,7 @@ private:
 
     AVFrame* fixedVideoFrame(AVFrame* frame, std::string_view source, FramePtr& generatedFrame)
     {
-        const auto pts = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
+        const auto pts = nextOutputVideoPts(lastVideoPts_);
 
         const bool valid = frame != nullptr
             && frame->format == softwarePixelFormatForEncoder(*codec_)
@@ -2660,11 +2728,11 @@ private:
             throw std::runtime_error{"allocate live AAC encoder failed"};
         }
         audioCodec_->codec_type = AVMEDIA_TYPE_AUDIO;
-        audioCodec_->sample_rate = fallbackAudioSampleRate;
+        audioCodec_->sample_rate = defaultOutputAudioSampleRate;
         audioCodec_->bit_rate = static_cast<std::int64_t>(std::max(32U, config_.pluto.audioBitrateKbps)) * 1000;
         audioCodec_->sample_fmt = AV_SAMPLE_FMT_FLTP;
-        av_channel_layout_default(&audioCodec_->ch_layout, 1);
-        audioCodec_->time_base = AVRational{1, fallbackAudioSampleRate};
+        av_channel_layout_default(&audioCodec_->ch_layout, outputAudioChannels(config_));
+        audioCodec_->time_base = AVRational{1, defaultOutputAudioSampleRate};
         if ((format_->oformat->flags & AVFMT_GLOBALHEADER) != 0) {
             audioCodec_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         }
@@ -3468,10 +3536,14 @@ private:
 
 class FallbackVideoTranscoder {
 public:
-    FallbackVideoTranscoder(RepeaterConfig config, EncodedOutputSink& output, std::filesystem::path path)
+    FallbackVideoTranscoder(RepeaterConfig config,
+                            EncodedOutputSink& output,
+                            std::filesystem::path path,
+                            std::function<void(std::optional<std::string>)> statusCallback)
         : config_{std::move(config)}
         , output_{output}
         , path_{std::move(path)}
+        , statusCallback_{std::move(statusCallback)}
         , thread_{[this] {
             run();
         }}
@@ -3494,6 +3566,12 @@ public:
         return finished_.load();
     }
 
+    void seekTo(std::chrono::milliseconds position)
+    {
+        std::lock_guard lock{seekMutex_};
+        pendingSeek_ = std::max(std::chrono::milliseconds{0}, position);
+    }
+
 private:
     static int interruptPlayback(void* opaque)
     {
@@ -3509,7 +3587,57 @@ private:
             std::cerr << "wh-repeater: fallback video stopped: " << ex.what() << '\n';
         }
         output_.endSubmittedSource("fallback-video");
+        publishStopped();
         finished_.store(true);
+    }
+
+    std::optional<std::chrono::milliseconds> takePendingSeek()
+    {
+        std::lock_guard lock{seekMutex_};
+        auto seek = pendingSeek_;
+        pendingSeek_.reset();
+        return seek;
+    }
+
+    [[nodiscard]] std::chrono::milliseconds duration() const
+    {
+        return duration_;
+    }
+
+    void publishStopped()
+    {
+        if (statusCallback_) {
+            statusCallback_(std::nullopt);
+        }
+    }
+
+    void publishStatus(std::chrono::milliseconds position)
+    {
+        if (!statusCallback_) {
+            return;
+        }
+        const auto durationMs = duration().count();
+        std::ostringstream status;
+        status << "{"
+               << "\"playing\":true,"
+               << "\"path\":" << jsonString(path_.string()) << ","
+               << "\"name\":" << jsonString(path_.filename().string()) << ","
+               << "\"positionMs\":" << std::max<std::int64_t>(0, position.count()) << ","
+               << "\"durationMs\":";
+        if (durationMs > 0) {
+            status << durationMs;
+        } else {
+            status << "null";
+        }
+        status << ",\"timecode\":" << jsonString(formatTimecode(position))
+               << ",\"durationTimecode\":";
+        if (durationMs > 0) {
+            status << jsonString(formatTimecode(std::chrono::milliseconds{durationMs}));
+        } else {
+            status << "null";
+        }
+        status << "}";
+        statusCallback_(status.str());
     }
 
     void transcodeLoop()
@@ -3534,6 +3662,9 @@ private:
         }
         InputFormatPtr inputFormat{rawInput};
         checkAv(avformat_find_stream_info(inputFormat.get(), nullptr), "probe fallback video streams");
+        duration_ = inputFormat->duration > 0
+            ? std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::microseconds{inputFormat->duration})
+            : std::chrono::milliseconds{0};
 
         const auto videoStreamIndex = av_find_best_stream(inputFormat.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
         checkAv(videoStreamIndex, "find fallback video stream");
@@ -3657,22 +3788,52 @@ private:
         SwsContextPtr scaler;
         SwrContextPtr audioResampler;
         AudioFifoPtr audioFifo;
-        const auto startedAt = std::chrono::steady_clock::now();
-        const auto playbackDeadline = inputFormat->duration > 0
-            ? std::optional<std::chrono::steady_clock::time_point>{
-                startedAt + std::chrono::microseconds{inputFormat->duration} + std::chrono::seconds{1}}
-            : std::nullopt;
+        const auto playbackDeadlineFor = [this](std::chrono::milliseconds position) -> std::optional<std::chrono::steady_clock::time_point> {
+            if (duration_.count() <= 0) {
+                return std::nullopt;
+            }
+            const auto remaining = std::max(std::chrono::milliseconds{0}, duration_ - position);
+            return std::chrono::steady_clock::now() + remaining + std::chrono::seconds{1};
+        };
+        auto playbackDeadline = playbackDeadlineFor(std::chrono::milliseconds{0});
         std::int64_t frameIndex = 0;
         std::int64_t decodedVideoFrames = 0;
         std::int64_t audioPts = 0;
-        const auto outputVideoBasePts = output_.nextVideoPts();
-        const auto outputAudioBasePts = output_.nextAudioPts();
+        std::int64_t outputVideoBasePts = output_.nextVideoPts();
+        std::int64_t outputAudioBasePts = output_.nextAudioPts();
         std::optional<double> firstVideoSeconds;
         std::int64_t lastVideoPts = -1;
+        std::chrono::milliseconds playbackPositionBase{0};
         const auto fallbackSourceFrameRate = sourceFrameRate(*videoStream);
         const auto streamSampleAspect = validSampleAspect(videoStream->sample_aspect_ratio,
                                                           videoStream->codecpar->sample_aspect_ratio);
         while (!stopping_.load()) {
+            if (auto seek = takePendingSeek(); seek.has_value()) {
+                const auto seekMicros = static_cast<std::int64_t>(seek->count()) * 1000;
+                const auto seekStatus = av_seek_frame(inputFormat.get(), -1, seekMicros, AVSEEK_FLAG_BACKWARD);
+                if (seekStatus < 0) {
+                    std::cerr << "wh-repeater: fallback video seek failed: " << avError(seekStatus) << '\n';
+                } else {
+                    avcodec_flush_buffers(decoderContext.get());
+                    if (audioDecoderContext) {
+                        avcodec_flush_buffers(audioDecoderContext.get());
+                    }
+                    audioResampler.reset();
+                    audioFifo.reset();
+                    firstVideoSeconds.reset();
+                    lastVideoPts = -1;
+                    decodedVideoFrames = 0;
+                    frameIndex = 0;
+                    audioPts = 0;
+                    playbackPositionBase = *seek;
+                    output_.beginSubmittedSource("fallback-video", audioDecoderContext != nullptr);
+                    output_.setSubmittedSourceHasAudio(audioDecoderContext != nullptr);
+                    outputVideoBasePts = output_.nextVideoPts();
+                    outputAudioBasePts = output_.nextAudioPts();
+                    playbackDeadline = playbackDeadlineFor(*seek);
+                    publishStatus(*seek);
+                }
+            }
             if (playbackDeadline.has_value() && std::chrono::steady_clock::now() >= *playbackDeadline) {
                 break;
             }
@@ -3699,7 +3860,8 @@ private:
                              lastVideoPts,
                              decodedVideoFrames,
                              frameIndex,
-                             outputVideoBasePts);
+                             outputVideoBasePts,
+                             playbackPositionBase);
             } else if (audioDecoderContext && packet->stream_index == audioStreamIndex) {
                 decodeAudioPacket(audioDecoderContext.get(),
                                   packet.get(),
@@ -3727,7 +3889,8 @@ private:
                      lastVideoPts,
                      decodedVideoFrames,
                      frameIndex,
-                     outputVideoBasePts);
+                     outputVideoBasePts,
+                     playbackPositionBase);
         if (audioDecoderContext) {
             checkAv(avcodec_send_packet(audioDecoderContext.get(), nullptr), "flush fallback audio decoder");
             drainAudioDecoder(audioDecoderContext.get(),
@@ -3756,7 +3919,8 @@ private:
                       std::int64_t& lastVideoPts,
                       std::int64_t& decodedVideoFrames,
                       std::int64_t& frameIndex,
-                      std::int64_t outputVideoBasePts)
+                      std::int64_t outputVideoBasePts,
+                      std::chrono::milliseconds playbackPositionBase)
     {
         const auto sendStatus = avcodec_send_packet(decoder, packet);
         if (sendStatus == AVERROR(EAGAIN)) {
@@ -3772,7 +3936,8 @@ private:
                          lastVideoPts,
                          decodedVideoFrames,
                          frameIndex,
-                         outputVideoBasePts);
+                         outputVideoBasePts,
+                         playbackPositionBase);
             checkAv(avcodec_send_packet(decoder, packet), "send fallback video packet after drain");
         } else {
             checkAv(sendStatus, "send fallback video packet");
@@ -3789,7 +3954,8 @@ private:
                      lastVideoPts,
                      decodedVideoFrames,
                      frameIndex,
-                     outputVideoBasePts);
+                     outputVideoBasePts,
+                     playbackPositionBase);
     }
 
     void drainDecoder(AVCodecContext* decoder,
@@ -3804,7 +3970,8 @@ private:
                       std::int64_t& lastVideoPts,
                       std::int64_t& decodedVideoFrames,
                       std::int64_t& frameIndex,
-                      std::int64_t outputVideoBasePts)
+                      std::int64_t outputVideoBasePts,
+                      std::chrono::milliseconds playbackPositionBase)
     {
         for (;;) {
             const auto receiveStatus = avcodec_receive_frame(decoder, frame);
@@ -3831,6 +3998,9 @@ private:
                 break;
             }
             outputMuxer.submitVideoFrame(convertFrame(frame, convertedFrame, scaler, outputMuxer, streamSampleAspect, pts), "fallback-video");
+            const auto positionMs = static_cast<std::int64_t>(
+                std::llround(static_cast<double>(pts) * 1000.0 / static_cast<double>(outputMuxer.frameRate())));
+            publishStatus(playbackPositionBase + std::chrono::milliseconds{std::max<std::int64_t>(0, positionMs)});
             frameIndex = pts + 1;
             av_frame_unref(frame);
             if (stopping_.load()) {
@@ -4177,6 +4347,10 @@ private:
     RepeaterConfig config_;
     EncodedOutputSink& output_;
     std::filesystem::path path_;
+    std::function<void(std::optional<std::string>)> statusCallback_;
+    std::chrono::milliseconds duration_{0};
+    std::mutex seekMutex_;
+    std::optional<std::chrono::milliseconds> pendingSeek_;
     std::atomic_bool stopping_{false};
     std::atomic_bool finished_{false};
     std::thread thread_;
@@ -4595,9 +4769,9 @@ public:
 
         const auto outputPts = audioSampleIndex_;
         audioSampleIndex_ += count;
-        GST_BUFFER_PTS(buffer) = gst_util_uint64_scale(static_cast<guint64>(outputPts), GST_SECOND, fallbackAudioSampleRate);
+        GST_BUFFER_PTS(buffer) = gst_util_uint64_scale(static_cast<guint64>(outputPts), GST_SECOND, defaultOutputAudioSampleRate);
         GST_BUFFER_DTS(buffer) = GST_BUFFER_PTS(buffer);
-        GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(static_cast<guint64>(count), GST_SECOND, fallbackAudioSampleRate);
+        GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(static_cast<guint64>(count), GST_SECOND, defaultOutputAudioSampleRate);
 
         const auto flow = gst_app_src_push_buffer(GST_APP_SRC(rawAudioSrc_), buffer);
         if (flow != GST_FLOW_OK) {
@@ -5106,7 +5280,7 @@ public:
         , frameRate_{outputFrameRate(config_)}
         , slideDurationFrames_{std::max<std::int64_t>(1, config_.fallback.slideDuration.count() * frameRate_ / 1000)}
         , morseUnits_{morseToneUnits(identText(config_))}
-        , morseUnitSamples_{std::max<std::int64_t>(1, static_cast<std::int64_t>(fallbackAudioSampleRate * 1.2 / std::max(1U, config_.ident.morseWpm)))}
+        , morseUnitSamples_{std::max<std::int64_t>(1, static_cast<std::int64_t>(defaultOutputAudioSampleRate * 1.2 / std::max(1U, config_.ident.morseWpm)))}
         , nextIdentFrame_{config_.ident.interval.count() > 0
                 ? 0
                 : std::numeric_limits<std::int64_t>::max()}
@@ -5177,7 +5351,7 @@ public:
     [[nodiscard]] std::int64_t nextVideoPts() const override
     {
         std::lock_guard lock{outputMutex_};
-        return lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
+        return nextOutputVideoPts(lastVideoPts_);
     }
 
     [[nodiscard]] std::int64_t nextAudioPts() const override
@@ -5211,7 +5385,7 @@ public:
         submittedVideoSource_ = sourceText;
         submittedAudioSource_ = sourceText;
         submittedSourceHasAudio_ = hasAudio;
-        submittedVideoBaseFrame_ = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
+        submittedVideoBaseFrame_ = nextOutputVideoPts(lastVideoPts_);
         submittedAudioStartSample_ = audioSampleIndex_;
         submittedVideoAt_ = {};
     }
@@ -5297,9 +5471,9 @@ public:
             clearSubmittedVideoLocked();
             clearSubmittedAudioLocked();
             submittedVideoSource_ = sourceText;
-            submittedVideoBaseFrame_ = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
+            submittedVideoBaseFrame_ = nextOutputVideoPts(lastVideoPts_);
         } else if (sourceText == "fallback-video" && submittedVideoBaseFrame_ == AV_NOPTS_VALUE) {
-            submittedVideoBaseFrame_ = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
+            submittedVideoBaseFrame_ = nextOutputVideoPts(lastVideoPts_);
         }
         if (sourceText == "fallback-video") {
             const auto maxQueuedVideoFrames = std::size_t{2};
@@ -5498,7 +5672,7 @@ private:
     std::int64_t submittedFrameDuePts(const AVFrame& frame) const
     {
         const auto base = submittedVideoBaseFrame_ == AV_NOPTS_VALUE
-            ? (lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1)
+            ? nextOutputVideoPts(lastVideoPts_)
             : submittedVideoBaseFrame_;
         const auto relativePts = frame.pts == AV_NOPTS_VALUE ? 0 : frame.pts;
         return base + relativePts;
@@ -5814,11 +5988,11 @@ private:
             throw std::runtime_error{"allocate fallback audio encoder failed"};
         }
         audioCodec_->codec_type = AVMEDIA_TYPE_AUDIO;
-        audioCodec_->sample_rate = fallbackAudioSampleRate;
+        audioCodec_->sample_rate = defaultOutputAudioSampleRate;
         audioCodec_->bit_rate = static_cast<std::int64_t>(std::max(32U, config_.pluto.audioBitrateKbps)) * 1000;
         audioCodec_->sample_fmt = AV_SAMPLE_FMT_FLTP;
-        av_channel_layout_default(&audioCodec_->ch_layout, 1);
-        audioCodec_->time_base = AVRational{1, fallbackAudioSampleRate};
+        av_channel_layout_default(&audioCodec_->ch_layout, outputAudioChannels(config_));
+        audioCodec_->time_base = AVRational{1, defaultOutputAudioSampleRate};
         if ((format_->oformat->flags & AVFMT_GLOBALHEADER) != 0) {
             audioCodec_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         }
@@ -5893,7 +6067,7 @@ private:
 
     AVFrame* fixedVideoFrame(AVFrame* frame, std::string_view source, FramePtr& generatedFrame)
     {
-        const auto pts = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
+        const auto pts = nextOutputVideoPts(lastVideoPts_);
 
         const bool valid = frame != nullptr
             && frame->format == outputPixelFormat()
@@ -5972,7 +6146,7 @@ private:
             const auto morseFrames = firstIdent_
                 ? static_cast<std::int64_t>(frameRate_) * 10
                 : std::max<std::int64_t>(frameRate_ * 5,
-                (morseSamples * frameRate_ + fallbackAudioSampleRate - 1) / fallbackAudioSampleRate);
+                (morseSamples * frameRate_ + defaultOutputAudioSampleRate - 1) / defaultOutputAudioSampleRate);
             identEndFrame_ = identStartFrame_ + morseFrames;
             nextIdentFrame_ = frameIndex + static_cast<std::int64_t>(config_.ident.interval.count()) * frameRate_;
             firstIdent_ = false;
@@ -5994,8 +6168,7 @@ private:
     {
 #if defined(WH_REPEATER_HAVE_GSTREAMER)
         if (gstMuxer_) {
-            const auto targetSample = nextVideoFrame * fallbackAudioSampleRate / frameRate_;
-            while (audioSampleIndex_ + audioFrameSamples_ <= targetSample) {
+            while (audioFrameDue(audioSampleIndex_, audioFrameSamples_, nextVideoFrame, defaultOutputAudioSampleRate, frameRate_)) {
                 writeAudioFrame(audioFrameSamples_, preferSubmittedAudio);
             }
             return;
@@ -6005,8 +6178,7 @@ private:
             return;
         }
 
-        const auto targetSample = nextVideoFrame * fallbackAudioSampleRate / frameRate_;
-        while (audioSampleIndex_ + audioFrameSamples_ <= targetSample) {
+        while (audioFrameDue(audioSampleIndex_, audioFrameSamples_, nextVideoFrame, defaultOutputAudioSampleRate, frameRate_)) {
             writeAudioFrame(audioFrameSamples_, preferSubmittedAudio);
         }
     }
@@ -6021,7 +6193,7 @@ private:
                 const auto sample = audioSampleIndex_ + index;
                 if (morseToneAtSample(sample)) {
                     const auto phase = 2.0 * pi * static_cast<double>(config_.ident.morseToneHz) * static_cast<double>(sample - identStartSample_)
-                        / static_cast<double>(fallbackAudioSampleRate);
+                        / static_cast<double>(defaultOutputAudioSampleRate);
                     audio[static_cast<std::size_t>(index)] = static_cast<float>(0.22 * std::sin(phase));
                 } else {
                     audio[static_cast<std::size_t>(index)] = 0.0F;
@@ -6059,15 +6231,20 @@ private:
             usedSubmittedAudio = true;
             ++statsSubmittedAudioOutputFrames_;
         } else {
-            auto* plane = reinterpret_cast<float*>(frame->data[0]);
-            for (int index = 0; index < samples; ++index) {
-                const auto sample = audioSampleIndex_ + index;
-                if (morseToneAtSample(sample)) {
-                    const auto phase = 2.0 * pi * static_cast<double>(config_.ident.morseToneHz) * static_cast<double>(sample - identStartSample_)
-                        / static_cast<double>(fallbackAudioSampleRate);
-                    plane[index] = static_cast<float>(0.22 * std::sin(phase));
-                } else {
-                    plane[index] = 0.0F;
+            for (int channel = 0; channel < frame->ch_layout.nb_channels; ++channel) {
+                auto* plane = reinterpret_cast<float*>(frame->extended_data[channel]);
+                if (plane == nullptr) {
+                    continue;
+                }
+                for (int index = 0; index < samples; ++index) {
+                    const auto sample = audioSampleIndex_ + index;
+                    if (morseToneAtSample(sample)) {
+                        const auto phase = 2.0 * pi * static_cast<double>(config_.ident.morseToneHz) * static_cast<double>(sample - identStartSample_)
+                            / static_cast<double>(defaultOutputAudioSampleRate);
+                        plane[index] = static_cast<float>(0.22 * std::sin(phase));
+                    } else {
+                        plane[index] = 0.0F;
+                    }
                 }
             }
         }
@@ -6287,7 +6464,17 @@ void MediaPipeline::stopFallbackVideo()
         return;
     }
     fallbackVideoPath_.reset();
+    pendingFallbackVideoSeek_.reset();
+    fallbackVideoStatus_.reset();
+    pendingFallbackVideoStatus_ = "null";
     enterFallback(std::chrono::steady_clock::now(), beaconAllowed_ || accessNotice_.has_value());
+}
+
+void MediaPipeline::seekFallbackVideo(std::chrono::milliseconds position)
+{
+    std::lock_guard lock{mutex_};
+    pendingFallbackVideoSeek_ = std::max(std::chrono::milliseconds{0}, position);
+    inputReady_.notify_all();
 }
 
 void MediaPipeline::setPreviewEnabled(bool enabled)
@@ -6304,6 +6491,9 @@ void MediaPipeline::tick(std::chrono::steady_clock::time_point now)
     if (active_.has_value()) {
         if (mode_ == MediaPipelineMode::fallbackVideo) {
             fallbackVideoPath_.reset();
+            pendingFallbackVideoSeek_.reset();
+            fallbackVideoStatus_.reset();
+            pendingFallbackVideoStatus_ = "null";
         }
         if (isAnalogueInput(config_, *active_)) {
             if (now < analogueRetryAfter_) {
@@ -6341,6 +6531,9 @@ void MediaPipeline::write(std::span<const std::byte> packet)
         }
         if (mode_ == MediaPipelineMode::fallbackVideo) {
             fallbackVideoPath_.reset();
+            pendingFallbackVideoSeek_.reset();
+            fallbackVideoStatus_.reset();
+            pendingFallbackVideoStatus_ = "null";
         }
         if (std::chrono::steady_clock::now() < liveRetryAfter_) {
             return;
@@ -6365,6 +6558,20 @@ std::optional<std::string> MediaPipeline::takeStreamInfoUpdate()
     return update;
 }
 
+std::optional<std::string> MediaPipeline::takeFallbackVideoStatusUpdate()
+{
+    std::lock_guard lock{mutex_};
+    auto update = std::move(pendingFallbackVideoStatus_);
+    pendingFallbackVideoStatus_.reset();
+    return update;
+}
+
+std::optional<std::string> MediaPipeline::fallbackVideoStatus() const
+{
+    std::lock_guard lock{mutex_};
+    return fallbackVideoStatus_;
+}
+
 void MediaPipeline::setSessionStreamInfo(std::optional<std::string> streamInfo)
 {
     std::lock_guard lock{mutex_};
@@ -6373,6 +6580,17 @@ void MediaPipeline::setSessionStreamInfo(std::optional<std::string> streamInfo)
     }
     sessionStreamInfo_ = streamInfo;
     pendingSessionStreamInfo_ = std::move(streamInfo);
+}
+
+void MediaPipeline::setFallbackVideoStatus(std::optional<std::string> statusJson)
+{
+    std::lock_guard lock{mutex_};
+    const auto pending = statusJson.has_value() ? statusJson : std::optional<std::string>{"null"};
+    if (fallbackVideoStatus_ == statusJson && pendingFallbackVideoStatus_ == pending) {
+        return;
+    }
+    fallbackVideoStatus_ = std::move(statusJson);
+    pendingFallbackVideoStatus_ = pending;
 }
 
 void MediaPipeline::ensureLibavReady()
@@ -6453,6 +6671,9 @@ void MediaPipeline::enterFallbackVideo(std::string path)
 
     inputQueue_.clear();
     fallbackVideoPath_ = std::move(path);
+    pendingFallbackVideoSeek_.reset();
+    fallbackVideoStatus_.reset();
+    pendingFallbackVideoStatus_ = "null";
     mode_ = MediaPipelineMode::fallbackVideo;
     transmitEnabled_ = true;
     output_.setTransmitEnabled(true);
@@ -6468,6 +6689,9 @@ void MediaPipeline::enterFallback(std::chrono::steady_clock::time_point now, boo
     }
 
     inputQueue_.clear();
+    pendingFallbackVideoSeek_.reset();
+    fallbackVideoStatus_.reset();
+    pendingFallbackVideoStatus_ = "null";
     mode_ = MediaPipelineMode::fallback;
     transmitEnabled_ = transmitEnabled;
     output_.setTransmitEnabled(transmitEnabled_);
@@ -6517,11 +6741,7 @@ void MediaPipeline::workerLoop()
     bool liveStreamInfoShown = false;
     auto advanceFrameClock = [](std::chrono::steady_clock::time_point& nextFrame,
                                 std::chrono::microseconds frameInterval) {
-        nextFrame += frameInterval;
-        const auto now = std::chrono::steady_clock::now();
-        if (nextFrame < now) {
-            nextFrame = now;
-        }
+        advanceOutputFrameClock(nextFrame, frameInterval, std::chrono::steady_clock::now());
     };
     auto nextFrameDeadline = [&] {
         const auto now = std::chrono::steady_clock::now();
@@ -6552,6 +6772,7 @@ void MediaPipeline::workerLoop()
         std::optional<std::string> notice;
         std::optional<std::string> streamIndicator;
         std::optional<std::string> fallbackVideoPath;
+        std::optional<std::chrono::milliseconds> fallbackVideoSeek;
         bool beaconAllowed{};
         {
             std::unique_lock lock{mutex_};
@@ -6566,6 +6787,8 @@ void MediaPipeline::workerLoop()
             notice = accessNotice_;
             streamIndicator = streamIndicator_;
             fallbackVideoPath = fallbackVideoPath_;
+            fallbackVideoSeek = pendingFallbackVideoSeek_;
+            pendingFallbackVideoSeek_.reset();
             beaconAllowed = beaconAllowed_;
         }
 
@@ -6594,7 +6817,7 @@ void MediaPipeline::workerLoop()
                 std::this_thread::sleep_until(nextFrameAt);
                 fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
                 fallbackMuxer->writeFrame(fallbackFrameIndex++);
-                advanceFrameClock(nextFrameAt, std::chrono::microseconds{1'000'000 / outputFrameRate(config_)});
+                advanceFrameClock(nextFrameAt, outputFrameInterval(outputFrameRate(config_)));
                 continue;
             }
 
@@ -6617,8 +6840,17 @@ void MediaPipeline::workerLoop()
                     fallbackMuxer->setStreamInfo(std::nullopt);
                 }
                 if (!fallbackVideoTranscoder && fallbackVideoPath.has_value()) {
-                    fallbackVideoTranscoder = std::make_unique<FallbackVideoTranscoder>(config_, *fallbackMuxer, *fallbackVideoPath);
+                    fallbackVideoTranscoder = std::make_unique<FallbackVideoTranscoder>(
+                        config_,
+                        *fallbackMuxer,
+                        *fallbackVideoPath,
+                        [this](std::optional<std::string> statusJson) {
+                            setFallbackVideoStatus(std::move(statusJson));
+                        });
                     activeFallbackVideoPath = fallbackVideoPath;
+                }
+                if (fallbackVideoTranscoder && fallbackVideoSeek.has_value()) {
+                    fallbackVideoTranscoder->seekTo(*fallbackVideoSeek);
                 }
                 bool playbackFinished{};
                 {
@@ -6645,7 +6877,7 @@ void MediaPipeline::workerLoop()
                     fallbackMuxer->setStreamInfo(std::nullopt);
                     std::cout << "media pipeline fallback video finished; returning to generated fallback stream\n";
                 } else {
-                    const auto frameInterval = std::chrono::microseconds{1'000'000 / outputFrameRate(config_)};
+                    const auto frameInterval = outputFrameInterval(outputFrameRate(config_));
                     fallbackMuxer->setNotice(std::nullopt);
                     std::this_thread::sleep_until(nextFrameAt);
                     fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
@@ -6716,7 +6948,7 @@ void MediaPipeline::workerLoop()
                     fallbackMuxer->setStreamInfo(std::nullopt);
                     std::cerr << "wh-repeater: analogue capture ended; returning to generated fallback stream\n";
                 } else {
-                    const auto frameInterval = std::chrono::microseconds{1'000'000 / outputFrameRate(config_)};
+                    const auto frameInterval = outputFrameInterval(outputFrameRate(config_));
                     fallbackMuxer->setNotice(std::nullopt);
                     std::this_thread::sleep_until(nextFrameAt);
                     fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
@@ -6829,7 +7061,7 @@ void MediaPipeline::workerLoop()
                     }
                 }
                 if (liveReady) {
-                    const auto frameInterval = std::chrono::microseconds{1'000'000 / outputFrameRate(config_)};
+                    const auto frameInterval = outputFrameInterval(outputFrameRate(config_));
                     const auto liveFillTimeout = std::max<std::chrono::microseconds>(
                         frameInterval * 12,
                         std::chrono::milliseconds{500});
@@ -6885,7 +7117,7 @@ void MediaPipeline::workerLoop()
                     std::this_thread::sleep_until(nextFrameAt);
                     fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
                     fallbackMuxer->writeFrame(fallbackFrameIndex++);
-                    advanceFrameClock(nextFrameAt, std::chrono::microseconds{1'000'000 / outputFrameRate(config_)});
+                    advanceFrameClock(nextFrameAt, outputFrameInterval(outputFrameRate(config_)));
                 }
                 if (liveFinished) {
                     retireLiveTranscoders();
