@@ -6443,10 +6443,13 @@ void MediaPipeline::setPreviewEnabled(bool enabled)
 void MediaPipeline::tick(std::chrono::steady_clock::time_point now)
 {
     std::lock_guard lock{mutex_};
-    if (mode_ == MediaPipelineMode::fallbackVideo) {
+    if (mode_ == MediaPipelineMode::fallbackVideo && !active_.has_value()) {
         return;
     }
     if (active_.has_value()) {
+        if (mode_ == MediaPipelineMode::fallbackVideo) {
+            fallbackVideoPath_.reset();
+        }
         if (isAnalogueInput(config_, *active_)) {
             if (now < analogueRetryAfter_) {
                 enterFallback(now, beaconAllowed_ || accessNotice_.has_value());
@@ -6482,7 +6485,7 @@ void MediaPipeline::write(std::span<const std::byte> packet)
             return;
         }
         if (mode_ == MediaPipelineMode::fallbackVideo) {
-            return;
+            fallbackVideoPath_.reset();
         }
         if (std::chrono::steady_clock::now() < liveRetryAfter_) {
             return;
