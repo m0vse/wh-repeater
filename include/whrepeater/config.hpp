@@ -49,6 +49,7 @@ struct PlutoConfig {
     std::uint32_t muxRateKbps{1200};
     std::uint32_t videoBitrateKbps{900};
     std::uint32_t audioBitrateKbps{96};
+    std::uint32_t outputAudioChannels{2};
     std::uint32_t outputWidth{1280};
     std::uint32_t outputHeight{720};
     std::uint32_t outputFrameRate{25};

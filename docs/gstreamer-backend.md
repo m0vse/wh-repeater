@@ -29,6 +29,10 @@ If the GStreamer backend is revived for PC-side media output, it must use a
 PC-appropriate encoder path and obey `docs/media-stream-contract.md`, including:
 
 - fixed configured output profile for every source;
+- AAC 48 kHz output-channel parity with the FFmpeg backend, including stereo as
+  the default. The previous GStreamer appsrc pipelines used `channels=1`; that
+  must not be carried forward as the default because stereo fallback/test media
+  can cancel to silence when downmixed to mono;
 - output muxer PTS as the single timing source;
 - no source-driven output PTS or frame-rate pacing;
 - no Pi V4L2 H.264 codec dependency.

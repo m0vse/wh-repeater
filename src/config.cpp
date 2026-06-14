@@ -705,6 +705,9 @@ RepeaterConfig configFromJson(std::string_view text)
         if (const auto* audioBitrateKbps = optionalMember(*pluto, "audioBitrateKbps")) {
             config.pluto.audioBitrateKbps = jsonUint32(*audioBitrateKbps, "pluto.audioBitrateKbps");
         }
+        if (const auto* outputAudioChannels = optionalMember(*pluto, "outputAudioChannels")) {
+            config.pluto.outputAudioChannels = std::clamp(jsonUint32(*outputAudioChannels, "pluto.outputAudioChannels"), 1U, 2U);
+        }
         if (const auto* outputWidth = optionalMember(*pluto, "outputWidth")) {
             config.pluto.outputWidth = std::clamp(jsonUint32(*outputWidth, "pluto.outputWidth"), 320U, 1920U) & ~1U;
         }
@@ -1021,6 +1024,7 @@ std::string configToJson(const RepeaterConfig& config)
         << "    \"muxRateKbps\": " << calculatePlutoMuxRateKbps(config.pluto) << ",\n"
         << "    \"videoBitrateKbps\": " << calculatePlutoVideoBitrateKbps(config.pluto) << ",\n"
         << "    \"audioBitrateKbps\": " << config.pluto.audioBitrateKbps << ",\n"
+        << "    \"outputAudioChannels\": " << config.pluto.outputAudioChannels << ",\n"
         << "    \"outputWidth\": " << config.pluto.outputWidth << ",\n"
         << "    \"outputHeight\": " << config.pluto.outputHeight << ",\n"
         << "    \"outputFrameRate\": " << config.pluto.outputFrameRate << ",\n"

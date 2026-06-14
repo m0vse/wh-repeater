@@ -247,8 +247,8 @@ The main sections are:
 - `receivers`: RX1-RX4 scan targets, dwell time, and hang time;
 - `analogue.capture`: generic USB/V4L2 analogue capture configuration;
 - `pluto`: DVB-S/S2 transmit settings, symbol rate, calculated mux/video rates,
-  fixed output width/height/frame rate, MQTT host, MQTT protocol/device id,
-  gain, callsign, and watermark text;
+  fixed output width/height/frame rate, output audio channels, MQTT host, MQTT
+  protocol/device id, gain, callsign, and watermark text;
 - `fallback`: slideshow folders, fallback video folder, fallback playback
   controls, hardware-decode preference, and slide timing. Fallback videos should
   preferably be pre-encoded to match `pluto.outputWidth`, `pluto.outputHeight`,

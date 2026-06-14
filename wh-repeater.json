@@ -26,6 +26,7 @@
     "muxRateKbps": 3686,
     "videoBitrateKbps": 3590,
     "audioBitrateKbps": 96,
+    "outputAudioChannels": 2,
     "outputWidth": 1280,
     "outputHeight": 720,
     "outputFrameRate": 25,
