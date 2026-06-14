@@ -29,13 +29,16 @@ class SignalArbitrator {
 public:
     explicit SignalArbitrator(const RepeaterConfig& config);
 
-    std::optional<ActiveInput> choose(const std::vector<ReceiverStatus>& statuses) const;
+    std::optional<ActiveInput> choose(const std::vector<ReceiverStatus>& statuses);
 
 private:
     bool isUsable(const ReceiverStatus& status) const;
     int receiverPriority(ReceiverId receiver) const;
+    std::optional<ActiveInput> activeForReceiver(const std::vector<ReceiverStatus>& statuses,
+                                                 ReceiverId receiver) const;
 
     RepeaterConfig config_;
+    std::optional<ReceiverId> activeReceiver_;
 };
 
 } // namespace whrepeater

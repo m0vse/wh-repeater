@@ -1,0 +1,21 @@
+[Unit]
+Description=WH PC gateway daemon
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=GST_V4L2_ENABLE_PROBE=1
+Environment=GST_REGISTRY=/var/lib/wh-pc-gateway/gstreamer-registry.bin
+WorkingDirectory=/var/lib/wh-pc-gateway
+ExecStartPre=/usr/bin/rm -f /var/lib/wh-pc-gateway/gstreamer-registry.bin
+ExecStart=/usr/local/bin/wh-pc-gateway /etc/wh-pc-gateway/config.json
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=15s
+KillMode=mixed
+FinalKillSignal=SIGKILL
+StateDirectory=wh-pc-gateway
+
+[Install]
+WantedBy=multi-user.target

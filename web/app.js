@@ -6,7 +6,7 @@
  *
  *  Purpose:
  *    Implements the browser-side management UI, status polling,
- *    receiver/SD1/TX rendering, configuration editing, dirty-state
+ *    receiver/TX rendering, configuration editing, dirty-state
  *    handling, and API calls.
  *
  *  Project notes:
@@ -20,7 +20,6 @@ const state = {
   config: null,
   status: null,
   dirty: false,
-  sd1EnabledOverride: null,
   saveMessageTimer: null,
 };
 
@@ -34,7 +33,6 @@ const el = {
   save: document.querySelector("#save"),
   serviceRestart: document.querySelector("#service-restart"),
   addReceiver: document.querySelector("#add-receiver"),
-  operatingMode: document.querySelector("#operating-mode"),
   statusInterval: document.querySelector("#status-interval"),
   minimumMer: document.querySelector("#minimum-mer"),
   minimumDNumber: document.querySelector("#minimum-dnumber"),
@@ -109,16 +107,6 @@ const el = {
   analogueCaptureGpioChip: document.querySelector("#analogue-capture-gpio-chip"),
   analogueCaptureGpioLine: document.querySelector("#analogue-capture-gpio-line"),
   analogueCaptureGpioActiveHigh: document.querySelector("#analogue-capture-gpio-active-high"),
-  sd1Enabled: document.querySelector("#sd1-enabled"),
-  sd1ReceiverId: document.querySelector("#sd1-receiver-id"),
-  sd1DeviceId: document.querySelector("#sd1-device-id"),
-  sd1I2cDevice: document.querySelector("#sd1-i2c-device"),
-  sd1I2cAddress: document.querySelector("#sd1-i2c-address"),
-  sd1Source: document.querySelector("#sd1-source"),
-  sd1CaptureDevice: document.querySelector("#sd1-capture-device"),
-  sd1CaptureWidth: document.querySelector("#sd1-capture-width"),
-  sd1CaptureHeight: document.querySelector("#sd1-capture-height"),
-  sd1CaptureFrameRate: document.querySelector("#sd1-capture-frame-rate"),
   identEnabled: document.querySelector("#ident-enabled"),
   serviceName: document.querySelector("#service-name"),
   identInterval: document.querySelector("#ident-interval"),
@@ -178,7 +166,7 @@ function receiverTuner(receiverId) {
 
 function receiverHardwareLabel(receiver) {
   if (receiver.type === "analogue") {
-    return receiver.deviceId || "sd1";
+    return receiver.deviceId || "analogue";
   }
   return `NIM ${receiver.nim || receiverNim(receiver.id)} ${receiver.antenna || fixedReceiverAntenna(receiver.id)} antenna`;
 }
@@ -188,36 +176,8 @@ function stateBadge(status) {
   return `<span class="badge ${locked ? "locked" : ""}">${status || "idle"}</span>`;
 }
 
-function sd1Placeholder() {
-  const sd1 = state.config?.analogue?.sd1 || {};
-  const analogue = state.status?.analogue || {};
-  return {
-    id: sd1.receiverId ?? 5,
-    name: "SD1",
-    type: "analogue",
-    deviceId: sd1.deviceId ?? "sd1",
-    state: analogue.present ? "idle" : "fault",
-    present: Boolean(analogue.present),
-    ready: Boolean(analogue.ready),
-    locked: Boolean(analogue.locked),
-    cameraRunning: Boolean(analogue.cameraRunning),
-    source: analogue.activeSource || analogue.selectedSource || "",
-    firmwareVersion: analogue.firmwareVersion || "",
-    hardwareId: analogue.hardwareId || "",
-    rawLock: analogue.rawLock ?? 0,
-    error: analogue.error || "Waiting for SD1 status",
-  };
-}
-
 function renderStatus() {
-  const sd1Enabled = state.sd1EnabledOverride
-    ?? state.status?.analogue?.enabled
-    ?? state.config?.analogue?.sd1?.enabled
-    ?? false;
-  const statuses = (state.status?.receivers || []).filter((receiver) => receiver.type !== "analogue" || sd1Enabled);
-  if (sd1Enabled && !statuses.some((receiver) => receiver.type === "analogue")) {
-    statuses.push(sd1Placeholder());
-  }
+  const statuses = state.status?.receivers || [];
   const activeReceiver = state.status?.activeReceiver;
 
   el.statusGrid.innerHTML = "";
@@ -415,7 +375,6 @@ function fillConfigForm() {
     return;
   }
 
-  el.operatingMode.value = config.mode ?? "local-transcode";
   el.statusInterval.value = config.statusIntervalMs ?? 500;
   el.minimumMer.value = config.selection?.minimumMerDb ?? 2;
   el.minimumDNumber.value = config.selection?.minimumDNumberDb ?? 0;
@@ -488,16 +447,6 @@ function fillConfigForm() {
   el.analogueCaptureGpioChip.value = config.analogue?.capture?.gpioChip ?? "/dev/gpiochip0";
   el.analogueCaptureGpioLine.value = config.analogue?.capture?.gpioLine ?? 26;
   el.analogueCaptureGpioActiveHigh.checked = config.analogue?.capture?.gpioActiveHigh ?? true;
-  el.sd1Enabled.checked = config.analogue?.sd1?.enabled ?? false;
-  el.sd1ReceiverId.value = config.analogue?.sd1?.receiverId ?? 5;
-  el.sd1DeviceId.value = config.analogue?.sd1?.deviceId ?? "sd1";
-  el.sd1I2cDevice.value = config.analogue?.sd1?.i2cDevice ?? "/dev/i2c-0";
-  el.sd1I2cAddress.value = config.analogue?.sd1?.i2cAddress ?? 64;
-  el.sd1Source.value = config.analogue?.sd1?.source ?? "auto";
-  el.sd1CaptureDevice.value = config.analogue?.sd1?.captureDevice ?? "/dev/video0";
-  el.sd1CaptureWidth.value = config.analogue?.sd1?.captureWidth ?? 640;
-  el.sd1CaptureHeight.value = config.analogue?.sd1?.captureHeight ?? 480;
-  el.sd1CaptureFrameRate.value = config.analogue?.sd1?.captureFrameRate ?? 25;
   el.identEnabled.checked = Boolean(config.ident?.enabled);
   el.serviceName.value = config.ident?.serviceName ?? "WH Repeater";
   el.identInterval.value = config.ident?.intervalSeconds ?? 600;
@@ -596,7 +545,7 @@ function readConfigForm() {
   }));
 
   return {
-    mode: el.operatingMode.value || "local-transcode",
+    mode: state.config?.mode || "pc-gateway",
     statusIntervalMs: numberValue(el.statusInterval, 500),
     selection: {
       minimumMerDb: numberValue(el.minimumMer, 2),
@@ -694,18 +643,6 @@ function readConfigForm() {
         gpioChip: el.analogueCaptureGpioChip.value || "/dev/gpiochip0",
         gpioLine: numberValue(el.analogueCaptureGpioLine, 26),
         gpioActiveHigh: el.analogueCaptureGpioActiveHigh.checked,
-      },
-      sd1: {
-        enabled: el.sd1Enabled.checked,
-        receiverId: numberValue(el.sd1ReceiverId, 5),
-        deviceId: el.sd1DeviceId.value || "sd1",
-        i2cDevice: el.sd1I2cDevice.value || "/dev/i2c-0",
-        i2cAddress: numberValue(el.sd1I2cAddress, 64),
-        source: el.sd1Source.value,
-        captureDevice: el.sd1CaptureDevice.value || "/dev/video0",
-        captureWidth: numberValue(el.sd1CaptureWidth, 640),
-        captureHeight: numberValue(el.sd1CaptureHeight, 480),
-        captureFrameRate: numberValue(el.sd1CaptureFrameRate, 25),
       },
     },
     ident: {
@@ -874,7 +811,6 @@ async function saveConfig() {
     throw new Error(body.error || `HTTP ${response.status}`);
   }
   state.config = config;
-  state.sd1EnabledOverride = config.analogue?.sd1?.enabled ?? null;
   state.dirty = false;
   fillConfigForm();
   renderStatus();
@@ -883,7 +819,6 @@ async function saveConfig() {
   const applied = await fetchAppliedConfig(config);
   if (applied) {
     state.config = applied;
-    state.sd1EnabledOverride = null;
     fillConfigForm();
     setSaveMessage("Saved");
   } else {
@@ -977,7 +912,6 @@ if (el.addReceiver) {
 }
 
 for (const input of [
-  el.operatingMode,
   el.statusInterval,
   el.minimumMer,
   el.minimumDNumber,
@@ -1044,16 +978,6 @@ for (const input of [
   el.analogueCaptureGpioChip,
   el.analogueCaptureGpioLine,
   el.analogueCaptureGpioActiveHigh,
-  el.sd1Enabled,
-  el.sd1ReceiverId,
-  el.sd1DeviceId,
-  el.sd1I2cDevice,
-  el.sd1I2cAddress,
-  el.sd1Source,
-  el.sd1CaptureDevice,
-  el.sd1CaptureWidth,
-  el.sd1CaptureHeight,
-  el.sd1CaptureFrameRate,
   el.identEnabled,
   el.serviceName,
   el.identInterval,

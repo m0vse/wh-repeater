@@ -19,6 +19,7 @@
 #include <iostream>
 #include <memory>
 #include <netdb.h>
+#include <poll.h>
 #include <stdexcept>
 #include <string>
 #include <sys/socket.h>
@@ -29,6 +30,7 @@ namespace {
 
 constexpr std::size_t transportPacketBytes = 188;
 constexpr std::size_t defaultDatagramBytes = 1316;
+constexpr int udpReceiveBufferBytes = 4 * 1024 * 1024;
 constexpr ReceiverId pcGatewayReceiver{1};
 
 void closeFd(int& fd)
@@ -107,6 +109,19 @@ void PcGatewayInput::pump(TsSink& sink)
     }
 }
 
+bool PcGatewayInput::waitForData(std::chrono::milliseconds timeout) const
+{
+    if (socket_ < 0) {
+        return false;
+    }
+    pollfd item{};
+    item.fd = socket_;
+    item.events = POLLIN;
+    const auto timeoutMs = static_cast<int>(std::clamp<long long>(timeout.count(), 0, 1000));
+    const auto result = ::poll(&item, 1, timeoutMs);
+    return result > 0 && (item.revents & POLLIN) != 0;
+}
+
 bool PcGatewayInput::active(std::chrono::steady_clock::time_point now,
                             std::chrono::milliseconds timeout) const
 {
@@ -170,6 +185,11 @@ void PcGatewayInput::openSocket()
 
         int reuse = 1;
         (void)::setsockopt(socket_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        int receiveBuffer = udpReceiveBufferBytes;
+        if (::setsockopt(socket_, SOL_SOCKET, SO_RCVBUF, &receiveBuffer, sizeof(receiveBuffer)) < 0) {
+            std::cerr << "wh-repeater: PC gateway UDP receive buffer request failed: "
+                      << std::strerror(errno) << '\n';
+        }
         if (::bind(socket_, result->ai_addr, result->ai_addrlen) == 0) {
             return;
         }

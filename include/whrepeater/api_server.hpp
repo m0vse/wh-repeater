@@ -59,6 +59,7 @@ public:
     std::optional<RepeaterConfig> takePendingConfig();
     std::optional<std::string> takePendingFallbackVideo();
     bool takePendingFallbackVideoStop();
+    std::optional<bool> takePendingPreviewEnabled();
 
 private:
     void serve();
@@ -80,6 +81,7 @@ private:
     std::optional<RepeaterConfig> pendingConfig_;
     std::optional<std::string> pendingFallbackVideo_;
     bool pendingFallbackVideoStop_{false};
+    std::optional<bool> pendingPreviewEnabled_;
     std::atomic_bool running_{false};
     int serverFd_{-1};
     std::thread serverThread_;

@@ -573,6 +573,14 @@ bool ApiServer::takePendingFallbackVideoStop()
     return pending;
 }
 
+std::optional<bool> ApiServer::takePendingPreviewEnabled()
+{
+    std::lock_guard lock{snapshotMutex_};
+    auto pending = pendingPreviewEnabled_;
+    pendingPreviewEnabled_.reset();
+    return pending;
+}
+
 void ApiServer::serve()
 {
     while (running_.load()) {
@@ -744,6 +752,24 @@ void ApiServer::handleClient(int clientFd)
             pendingFallbackVideoStop_ = true;
         }
         writeResponse(clientFd, "202 Accepted", "application/json", "{\"accepted\":true}\n");
+        return;
+    }
+
+    if (method == "POST" && path == "/api/preview/start") {
+        {
+            std::lock_guard lock{snapshotMutex_};
+            pendingPreviewEnabled_ = true;
+        }
+        writeResponse(clientFd, "202 Accepted", "application/json", "{\"accepted\":true,\"preview\":true}\n");
+        return;
+    }
+
+    if (method == "POST" && path == "/api/preview/stop") {
+        {
+            std::lock_guard lock{snapshotMutex_};
+            pendingPreviewEnabled_ = false;
+        }
+        writeResponse(clientFd, "202 Accepted", "application/json", "{\"accepted\":true,\"preview\":false}\n");
         return;
     }
 

@@ -4,8 +4,8 @@
 
 The project uses the original Winterhill C code only as hardware reference. The
 daemon talks to the existing `whdriver` kernel module for Winterhill board
-access and keeps the Serit NIM, STV0910, STV6120, PIC, PlutoPlus, SD1 analogue
-input, media pipeline, and management API behind contained C++ interfaces.
+access and keeps the Serit NIM, STV0910, STV6120, PIC, PlutoPlus, media
+pipeline, and management API behind contained C++ interfaces.
 
 ## Current State
 
@@ -19,8 +19,7 @@ This is the first working streaming test build. It can:
 - scan configured frequency, symbol-rate, DVB-S/S2 mode, and FEC targets;
 - pause scanning while a receiver is locked, then resume after a configured hang
   time once the signal is lost;
-- support a generic USB/V4L2 analogue capture input, with parked Lintest
-  Systems SD1 support retained for future CSI mode work;
+- support a generic USB/V4L2 analogue capture input;
 - serve a local REST API on `127.0.0.1:8080`;
 - serve a web management UI through nginx over HTTPS;
 - generate a continuous MPEG-TS media pipeline with blue fallback/status slides;
@@ -68,6 +67,10 @@ the received UDP MPEG-TS into the media worker for fallback, RTMP, and Pluto
 output.
 The Pi/PC gateway boundary is documented in
 [`docs/pi-gateway-api.md`](docs/pi-gateway-api.md).
+That document also records the planned three-NIC Intel Core Ultra mini-PC
+layout: management/BATC, dedicated Pi/Winterhill TS link, and dedicated Pluto
+link. The mini-PC is a future target and should not be assumed available for
+current testing.
 
 `media.backend` selects the media implementation used by `local-transcode`.
 `ffmpeg` is the stable default.
@@ -87,7 +90,7 @@ On the Pi target:
   `libswscale`;
 - the Winterhill `whdriver` kernel module and device node, normally
   `/dev/whdriver-4v00`;
-- I2C enabled for the NIM hardware and optional SD1 board;
+- I2C enabled for the NIM hardware;
 - nginx if using the packaged web UI;
 - a self-signed or real certificate at
   `/etc/ssl/wh-repeater/wh-repeater.crt` and
@@ -124,17 +127,29 @@ The installed service expects mutable configuration in
 `/etc/wh-repeater/wh-repeater.json` and the binary at
 `/usr/local/bin/wh-repeater`.
 
-For this PC-side gateway role, build and deploy the daemon, web UI, systemd
-unit, and nginx site together with:
+For the PC-side gateway role, build and deploy the daemon, web UI, systemd unit,
+and nginx site together with:
 
 ```sh
-sudo ./deploy/install.sh
+sudo DEPLOY_TARGET=pc-gateway ./deploy/install.sh
 ```
 
-The script preserves an existing `/etc/wh-repeater/wh-repeater.json`. On a fresh
-install it seeds that config with `mode` set to `pc-gateway`; override this with
-`DEPLOY_MODE=ts-gateway` or `DEPLOY_MODE=local-transcode` when installing a Pi
-or legacy single-box system.
+This installs `wh-pc-gateway.service`, stores config at
+`/etc/wh-pc-gateway/config.json`, stores state under `/var/lib/wh-pc-gateway`,
+and installs the web UI/nginx site.
+
+For the Pi/Winterhill hardware gateway role, install the headless service with:
+
+```sh
+sudo DEPLOY_TARGET=pi-gateway ./deploy/install.sh
+```
+
+This installs `wh-pi-gateway.service`, stores config at
+`/etc/wh-pi-gateway/config.json`, stores state under `/var/lib/wh-pi-gateway`,
+and deliberately skips the web UI and nginx. The Pi service exposes only the
+machine API on port 8080 for the PC gateway to control and monitor.
+
+For the older single-service layout, use `DEPLOY_TARGET=legacy`.
 
 Manual install commands are:
 
@@ -164,6 +179,30 @@ sudo journalctl -u wh-repeater.service
 curl -sS http://127.0.0.1:8080/api/health
 curl -sS http://127.0.0.1:8080/api/status
 ```
+
+## Diagnostic HDMI Preview
+
+The deploy script installs `wh-preview.service` for on-demand local HDMI output
+diagnostics, but does not enable or start it. The service is intended to consume
+a future local preview TS mirror at `udp://127.0.0.1:15000` with `mpv` using
+DRM/KMS, so it does not require X11 or Wayland.
+
+Start and stop it only when needed:
+
+```sh
+sudo systemctl start wh-preview.service
+sudo systemctl stop wh-preview.service
+sudo systemctl status wh-preview.service
+```
+
+The unit calls the future preview control API when it starts and stops:
+
+```text
+POST http://127.0.0.1:8080/api/preview/start
+POST http://127.0.0.1:8080/api/preview/stop
+```
+
+Those endpoints are placeholders until the preview mirror is implemented.
 
 ## Web UI
 
@@ -204,7 +243,6 @@ The main sections are:
   and output role;
 - `receivers`: RX1-RX4 scan targets, dwell time, and hang time;
 - `analogue.capture`: generic USB/V4L2 analogue capture configuration;
-- `analogue.sd1`: parked SD1 analogue configuration, disabled by default;
 - `pluto`: DVB-S/S2 transmit settings, symbol rate, calculated mux/video rates,
   fixed output width/height/frame rate, MQTT host, MQTT protocol/device id,
   gain, callsign, and watermark text;
@@ -249,12 +287,9 @@ capture cards that expose input sync state; it only locks when the selected
 V4L2 input is not reporting no-signal or no-hsync. The Automation HAT default
 for GPIO lock is input 1 on `/dev/gpiochip0` line 26, active high.
 
-SD1 analogue support is parked pending confirmed CSI output details from the
-Lintest board. The retained code can read the PiVideo control processor at
-`/dev/i2c-0` address `0x40`, and the latest hardware tests found the emulated
-OV5647 camera endpoint at `0x36` on camera mux bus `i2c-10`, but no completed
-CSI frames were received. Keep `analogue.sd1.enabled` false until the CSI data
-type, lane count, timing, and link frequency are confirmed.
+The Lintest Systems SD1 analogue experiment has been removed. It depends on
+Pi-local CSI capture, produced no completed frames during testing, and cannot
+fit the split design where the PC owns media decode/transcode/output.
 
 Hardware PTT is disabled by default. When enabled, the daemon uses the Linux GPIO
 character-device API, normally `/dev/gpiochip0`, and asserts the configured line
@@ -293,8 +328,6 @@ and uses the serial-scoped `cmd/pluto/<device-id>/...` and
 - `src/media_process.cpp`: parent-side media child supervision and IPC.
 - `src/media_pipeline.cpp`: child-side FFmpeg/V4L2 media generation,
   encoding, RTMP output, and fallback rendering.
-- `src/sd1_controller.cpp`: parked SD1 analogue receiver status over I2C.
-- `docs/sd1-parked.md`: SD1 test findings and restoration notes.
 - `src/api_server.cpp`: localhost REST API.
 - `web/`: static browser management UI.
 - `deploy/`: systemd and nginx deployment files.

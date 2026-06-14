@@ -20,7 +20,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WH Repeater</title>
-  <link rel="stylesheet" href="/styles.css?v=20260612-header-status">
+  <link rel="stylesheet" href="/styles.css?v=20260614-clean-ui">
 </head>
 <body>
   <header class="topbar">
@@ -50,14 +50,6 @@
           <h3>Signal Selection</h3>
           <div class="form-grid compact">
             <label>
-              Operating mode
-              <select id="operating-mode">
-                <option value="local-transcode">Local transcode</option>
-                <option value="ts-gateway">TS gateway</option>
-                <option value="pc-gateway">PC gateway</option>
-              </select>
-            </label>
-            <label>
               Status interval ms
               <input id="status-interval" type="number" min="100" step="100">
             </label>
@@ -69,6 +61,61 @@
               Minimum D-number dB
               <input id="minimum-dnumber" type="number" step="0.1">
             </label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <div class="panel-head inline-head">
+            <h3>NIM Gateway</h3>
+          </div>
+
+          <div class="config-subsections">
+            <div class="config-subsection">
+              <h4>TS Gateway</h4>
+              <div class="form-grid compact">
+                <label>
+                  PC destination address
+                  <input id="ts-gateway-address" type="text" placeholder="192.168.1.100">
+                </label>
+                <label>
+                  PC destination UDP port
+                  <input id="ts-gateway-port" type="number" min="1" max="65535">
+                </label>
+                <label>
+                  PC listen address
+                  <input id="gateway-input-address" type="text" placeholder="0.0.0.0">
+                </label>
+                <label>
+                  PC listen UDP port
+                  <input id="gateway-input-port" type="number" min="1" max="65535">
+                </label>
+                <label>
+                  PC UDP packet size
+                  <input id="gateway-input-packet-size" type="number" min="188" step="188">
+                </label>
+                <label class="check">
+                  <input id="pi-status-enabled" type="checkbox">
+                  Pi status polling
+                </label>
+                <label>
+                  Pi API address
+                  <input id="pi-status-address" type="text" placeholder="192.168.1.10">
+                </label>
+                <label>
+                  Pi API port
+                  <input id="pi-status-port" type="number" min="1" max="65535">
+                </label>
+                <label>
+                  Pi status poll ms
+                  <input id="pi-status-poll-interval" type="number" min="100" step="100">
+                </label>
+              </div>
+            </div>
+
+            <div class="config-subsection">
+              <h4>NIM Scan Plan</h4>
+              <div id="receivers"></div>
+            </div>
           </div>
         </section>
 
@@ -258,48 +305,6 @@
             </div>
 
             <div class="config-subsection">
-              <h4>TS Gateway</h4>
-              <div class="form-grid compact">
-                <label>
-                  PC destination address
-                  <input id="ts-gateway-address" type="text" placeholder="192.168.1.100">
-                </label>
-                <label>
-                  PC destination UDP port
-                  <input id="ts-gateway-port" type="number" min="1" max="65535">
-                </label>
-                <label>
-                  PC listen address
-                  <input id="gateway-input-address" type="text" placeholder="0.0.0.0">
-                </label>
-                <label>
-                  PC listen UDP port
-                  <input id="gateway-input-port" type="number" min="1" max="65535">
-                </label>
-                <label>
-                  PC UDP packet size
-                  <input id="gateway-input-packet-size" type="number" min="188" step="188">
-                </label>
-                <label class="checkbox">
-                  <input id="pi-status-enabled" type="checkbox">
-                  Pi status polling
-                </label>
-                <label>
-                  Pi API address
-                  <input id="pi-status-address" type="text" placeholder="192.168.1.10">
-                </label>
-                <label>
-                  Pi API port
-                  <input id="pi-status-port" type="number" min="1" max="65535">
-                </label>
-                <label>
-                  Pi status poll ms
-                  <input id="pi-status-poll-interval" type="number" min="100" step="100">
-                </label>
-              </div>
-            </div>
-
-            <div class="config-subsection">
               <h4>Fallback</h4>
               <div class="form-grid">
                 <label>
@@ -475,68 +480,9 @@
             </label>
           </div>
         </section>
-
-        <section class="config-section" hidden>
-          <h3>SD1 Analogue Input</h3>
-          <div class="form-grid">
-            <label class="check">
-              <input id="sd1-enabled" type="checkbox">
-              SD1 enabled
-            </label>
-            <label>
-              SD1 I2C device
-              <input id="sd1-i2c-device" type="text" value="/dev/i2c-0">
-            </label>
-            <label>
-              SD1 I2C address
-              <input id="sd1-i2c-address" type="number" min="0" max="127" value="64">
-            </label>
-            <label>
-              SD1 receiver ID
-              <input id="sd1-receiver-id" type="number" min="1" value="5">
-            </label>
-            <label>
-              SD1 device ID
-              <input id="sd1-device-id" type="text" value="sd1">
-            </label>
-            <label>
-              SD1 source
-              <select id="sd1-source">
-                <option value="auto">Auto</option>
-                <option value="video1">Video 1</option>
-                <option value="video2">Video 2</option>
-                <option value="video3">Video 3</option>
-                <option value="svideo">S-Video</option>
-                <option value="component">Component</option>
-              </select>
-            </label>
-            <label>
-              SD1 capture device
-              <input id="sd1-capture-device" type="text" value="/dev/video0">
-            </label>
-            <label>
-              SD1 capture width
-              <input id="sd1-capture-width" type="number" min="160" max="1920" value="640">
-            </label>
-            <label>
-              SD1 capture height
-              <input id="sd1-capture-height" type="number" min="120" max="1080" value="480">
-            </label>
-            <label>
-              SD1 capture fps
-              <input id="sd1-capture-frame-rate" type="number" min="1" max="50" value="25">
-            </label>
-          </div>
-        </section>
       </div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2>NIM Scan Plan</h2>
-      </div>
-      <div id="receivers"></div>
-    </section>
   </main>
 
   <template id="receiver-template">
@@ -613,6 +559,6 @@
     </div>
   </template>
 
-  <script src="/app.js?v=20260612-status-timeout" defer></script>
+  <script src="/app.js?v=20260614-clean-ui" defer></script>
 </body>
 </html>

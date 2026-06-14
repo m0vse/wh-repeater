@@ -43,10 +43,12 @@ public:
     void setAccessNotice(std::optional<std::string> notice);
     void playFallbackVideo(std::string path);
     void stopFallbackVideo();
+    void setPreviewEnabled(bool enabled);
     void tick(std::chrono::steady_clock::time_point now);
     void write(std::span<const std::byte> packet) override;
 
     [[nodiscard]] MediaPipelineMode mode() const;
+    [[nodiscard]] std::optional<std::string> streamInfo() const;
 
 private:
     void ensureRunning();
@@ -54,12 +56,14 @@ private:
     void stopChild();
     void reapChild(bool restart);
     bool sendMessage(std::uint32_t type, std::span<const std::byte> payload, bool essential);
+    void drainChildMessages();
     void flushTransportBuffer(bool essential);
     void replayState();
 
     RepeaterConfig config_;
     std::optional<ActiveInput> active_;
     bool beaconAllowed_{true};
+    bool previewEnabled_{false};
     std::optional<std::string> accessNotice_;
     std::optional<std::string> fallbackVideoPath_;
     MediaPipelineMode mode_{MediaPipelineMode::idle};
@@ -69,6 +73,8 @@ private:
     std::optional<std::vector<std::byte>> lastSelectPayload_;
     std::optional<std::vector<std::byte>> lastBeaconPayload_;
     std::optional<std::vector<std::byte>> lastNoticePayload_;
+    std::optional<std::vector<std::byte>> lastPreviewPayload_;
+    std::optional<std::string> streamInfo_;
 };
 
 } // namespace whrepeater

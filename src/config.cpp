@@ -953,45 +953,6 @@ RepeaterConfig configFromJson(std::string_view text)
                 config.analogue.capture.gpioActiveHigh = jsonBool(*gpioActiveHigh, "analogue.capture.gpioActiveHigh");
             }
         }
-        if (const auto* sd1 = optionalMember(*analogue, "sd1")) {
-            if (const auto* enabled = optionalMember(*sd1, "enabled")) {
-                config.analogue.sd1.enabled = jsonBool(*enabled, "analogue.sd1.enabled");
-            }
-            if (const auto* receiverId = optionalMember(*sd1, "receiverId")) {
-                config.analogue.sd1.receiver = ReceiverId{jsonInt(*receiverId, "analogue.sd1.receiverId")};
-                if (config.analogue.sd1.receiver.value < 1) {
-                    throw std::runtime_error{"analogue.sd1.receiverId must be positive"};
-                }
-            }
-            if (const auto* deviceId = optionalMember(*sd1, "deviceId")) {
-                config.analogue.sd1.deviceId = jsonText(*deviceId, "analogue.sd1.deviceId");
-            }
-            if (const auto* i2cDevice = optionalMember(*sd1, "i2cDevice")) {
-                config.analogue.sd1.i2cDevice = jsonText(*i2cDevice, "analogue.sd1.i2cDevice");
-            }
-            if (const auto* i2cAddress = optionalMember(*sd1, "i2cAddress")) {
-                const auto address = jsonUint32(*i2cAddress, "analogue.sd1.i2cAddress");
-                if (address > 0x7f) {
-                    throw std::runtime_error{"analogue.sd1.i2cAddress must be a 7-bit I2C address"};
-                }
-                config.analogue.sd1.i2cAddress = static_cast<std::uint8_t>(address);
-            }
-            if (const auto* source = optionalMember(*sd1, "source")) {
-                config.analogue.sd1.source = jsonText(*source, "analogue.sd1.source");
-            }
-            if (const auto* captureDevice = optionalMember(*sd1, "captureDevice")) {
-                config.analogue.sd1.captureDevice = jsonText(*captureDevice, "analogue.sd1.captureDevice");
-            }
-            if (const auto* captureWidth = optionalMember(*sd1, "captureWidth")) {
-                config.analogue.sd1.captureWidth = std::clamp(jsonUint32(*captureWidth, "analogue.sd1.captureWidth"), 160U, 1920U);
-            }
-            if (const auto* captureHeight = optionalMember(*sd1, "captureHeight")) {
-                config.analogue.sd1.captureHeight = std::clamp(jsonUint32(*captureHeight, "analogue.sd1.captureHeight"), 120U, 1080U);
-            }
-            if (const auto* captureFrameRate = optionalMember(*sd1, "captureFrameRate")) {
-                config.analogue.sd1.captureFrameRate = std::clamp(jsonUint32(*captureFrameRate, "analogue.sd1.captureFrameRate"), 1U, 50U);
-            }
-        }
     }
 
     const auto& receivers = requiredMember(root, "receivers");
@@ -1145,18 +1106,6 @@ std::string configToJson(const RepeaterConfig& config)
         << "      \"gpioChip\": " << jsonString(config.analogue.capture.gpioChip) << ",\n"
         << "      \"gpioLine\": " << config.analogue.capture.gpioLine << ",\n"
         << "      \"gpioActiveHigh\": " << (config.analogue.capture.gpioActiveHigh ? "true" : "false") << "\n"
-        << "    },\n"
-        << "    \"sd1\": {\n"
-        << "      \"enabled\": " << (config.analogue.sd1.enabled ? "true" : "false") << ",\n"
-        << "      \"receiverId\": " << config.analogue.sd1.receiver.value << ",\n"
-        << "      \"deviceId\": " << jsonString(config.analogue.sd1.deviceId) << ",\n"
-        << "      \"i2cDevice\": " << jsonString(config.analogue.sd1.i2cDevice) << ",\n"
-        << "      \"i2cAddress\": " << static_cast<int>(config.analogue.sd1.i2cAddress) << ",\n"
-        << "      \"source\": " << jsonString(config.analogue.sd1.source) << ",\n"
-        << "      \"captureDevice\": " << jsonString(config.analogue.sd1.captureDevice) << ",\n"
-        << "      \"captureWidth\": " << config.analogue.sd1.captureWidth << ",\n"
-        << "      \"captureHeight\": " << config.analogue.sd1.captureHeight << ",\n"
-        << "      \"captureFrameRate\": " << config.analogue.sd1.captureFrameRate << "\n"
         << "    }\n"
         << "  },\n"
         << "  \"receivers\": [\n";

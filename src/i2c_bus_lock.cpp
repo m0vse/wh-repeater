@@ -5,8 +5,8 @@
  *  Copyright (c) 2026 Phil Taylor (M0VSE)
  *
  *  Purpose:
- *    Defines the global mutex that prevents concurrent SD1 and Serit NIM
- *    operations from colliding on the Raspberry Pi I2C bus.
+ *    Defines the global mutex used to serialize Serit NIM operations on the
+ *    Raspberry Pi I2C bus.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.

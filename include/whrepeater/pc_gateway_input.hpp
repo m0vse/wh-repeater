@@ -47,6 +47,7 @@ public:
     PcGatewayInput& operator=(const PcGatewayInput&) = delete;
 
     void pump(TsSink& sink);
+    [[nodiscard]] bool waitForData(std::chrono::milliseconds timeout) const;
 
     [[nodiscard]] bool active(std::chrono::steady_clock::time_point now,
                               std::chrono::milliseconds timeout) const;

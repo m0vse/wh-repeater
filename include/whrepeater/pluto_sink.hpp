@@ -41,18 +41,25 @@ public:
     void write(std::span<const std::byte> packet) override;
     void writeMuxData(std::span<const std::byte> data);
     void setTransmitEnabled(bool enabled);
+    void setPreviewEnabled(bool enabled);
 
 private:
     void openSocket();
     void flushDatagram();
+    void openPreviewSocket();
+    void writePreviewData(std::span<const std::byte> data);
+    void flushPreviewDatagram();
     void configureTransmitter();
     void publishControl(std::string_view suffix, std::string_view payload);
 
     PlutoConfig config_;
     int socket_{-1};
+    int previewSocket_{-1};
     std::vector<std::byte> datagram_;
+    std::vector<std::byte> previewDatagram_;
     bool configured_{false};
     bool transmitEnabled_{false};
+    bool previewEnabled_{false};
 };
 
 } // namespace whrepeater

@@ -54,10 +54,12 @@ public:
     void setAccessNotice(std::optional<std::string> notice);
     void playFallbackVideo(std::string path);
     void stopFallbackVideo();
+    void setPreviewEnabled(bool enabled);
     void tick(std::chrono::steady_clock::time_point now);
     void write(std::span<const std::byte> packet) override;
 
     [[nodiscard]] MediaPipelineMode mode() const;
+    std::optional<std::string> takeStreamInfoUpdate();
 
 private:
     void ensureLibavReady();
@@ -69,6 +71,7 @@ private:
     void workerLoop();
     void stopWorker();
     void queueInput(std::span<const std::byte> packet);
+    void setSessionStreamInfo(std::optional<std::string> streamInfo);
 
     RepeaterConfig config_;
     PlutoSink output_;
@@ -81,6 +84,8 @@ private:
     bool transmitEnabled_{false};
     std::optional<std::string> accessNotice_;
     std::optional<std::string> streamIndicator_;
+    std::optional<std::string> sessionStreamInfo_;
+    std::optional<std::string> pendingSessionStreamInfo_;
     std::optional<std::string> fallbackVideoPath_;
     mutable std::mutex mutex_;
     std::condition_variable inputReady_;

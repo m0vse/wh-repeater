@@ -15,6 +15,7 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <cstdlib>
 #include <memory>
 #include <netdb.h>
 #include <poll.h>
@@ -73,12 +74,65 @@ std::optional<std::string> GatewayStatusClient::poll(std::chrono::steady_clock::
     return body;
 }
 
+std::optional<std::string> GatewayStatusClient::fetchConfig()
+{
+    auto response = request("GET", "/api/config");
+    if (!response.has_value()) {
+        return std::nullopt;
+    }
+    if (response->status != 200) {
+        lastError_ = "Pi config response was HTTP " + std::to_string(response->status);
+        return std::nullopt;
+    }
+    if (response->body.empty() || response->body.front() != '{') {
+        lastError_ = "Pi config response body is not JSON";
+        return std::nullopt;
+    }
+    lastError_.reset();
+    return response->body;
+}
+
+bool GatewayStatusClient::putConfig(const RepeaterConfig& config)
+{
+    auto response = request("PUT", "/api/config", configToJson(config), "application/json");
+    if (!response.has_value()) {
+        return false;
+    }
+    if (response->status != 200 && response->status != 202) {
+        lastError_ = "Pi config update response was HTTP " + std::to_string(response->status);
+        return false;
+    }
+    lastError_.reset();
+    return true;
+}
+
 const std::optional<std::string>& GatewayStatusClient::lastError() const
 {
     return lastError_;
 }
 
 std::optional<std::string> GatewayStatusClient::fetchStatus()
+{
+    auto response = request("GET", "/api/status");
+    if (!response.has_value()) {
+        return std::nullopt;
+    }
+    if (response->status != 200) {
+        lastError_ = "Pi status response was HTTP " + std::to_string(response->status);
+        return std::nullopt;
+    }
+    if (response->body.empty() || response->body.front() != '{') {
+        lastError_ = "Pi status response body is not JSON";
+        return std::nullopt;
+    }
+    return response->body;
+}
+
+std::optional<GatewayStatusClient::HttpResponse> GatewayStatusClient::request(
+    const std::string& method,
+    const std::string& path,
+    const std::string& body,
+    const std::string& contentType)
 {
     addrinfo hints {};
     hints.ai_family = AF_UNSPEC;
@@ -122,22 +176,34 @@ std::optional<std::string> GatewayStatusClient::fetchStatus()
         if (connectError.empty()) {
             connectError = "no usable address";
         }
-        lastError_ = "Pi status connect failed to " + config_.address + ':' + port + ": " + connectError;
+        lastError_ = "Pi API connect failed to " + config_.address + ':' + port + ": " + connectError;
         return std::nullopt;
     }
 
-    const auto request = "GET /api/status HTTP/1.1\r\nHost: " + config_.address + "\r\nConnection: close\r\n\r\n";
-    const char* cursor = request.data();
-    auto remaining = request.size();
+    std::ostringstream requestStream;
+    requestStream << method << ' ' << path << " HTTP/1.1\r\n"
+                  << "Host: " << config_.address << "\r\n"
+                  << "Connection: close\r\n";
+    if (!body.empty() || method == "PUT" || method == "POST") {
+        requestStream << "Content-Length: " << body.size() << "\r\n";
+        if (!contentType.empty()) {
+            requestStream << "Content-Type: " << contentType << "\r\n";
+        }
+    }
+    requestStream << "\r\n" << body;
+
+    const auto requestText = requestStream.str();
+    const char* cursor = requestText.data();
+    auto remaining = requestText.size();
     while (remaining > 0) {
         if (!waitFor(fd, POLLOUT)) {
-            lastError_ = "Pi status request timed out";
+            lastError_ = "Pi API request timed out";
             closeFd(fd);
             return std::nullopt;
         }
         const auto written = ::send(fd, cursor, remaining, MSG_NOSIGNAL);
         if (written <= 0) {
-            lastError_ = "Pi status request failed: " + std::string{std::strerror(errno)};
+            lastError_ = "Pi API request failed: " + std::string{std::strerror(errno)};
             closeFd(fd);
             return std::nullopt;
         }
@@ -156,7 +222,7 @@ std::optional<std::string> GatewayStatusClient::fetchStatus()
             break;
         }
         if (received < 0) {
-            lastError_ = "Pi status read failed: " + std::string{std::strerror(errno)};
+            lastError_ = "Pi API read failed: " + std::string{std::strerror(errno)};
             closeFd(fd);
             return std::nullopt;
         }
@@ -166,19 +232,23 @@ std::optional<std::string> GatewayStatusClient::fetchStatus()
 
     const auto headerEnd = response.find("\r\n\r\n");
     if (headerEnd == std::string::npos) {
-        lastError_ = "Pi status response missing HTTP headers";
+        lastError_ = "Pi API response missing HTTP headers";
         return std::nullopt;
     }
-    if (response.find("HTTP/1.1 200") != 0 && response.find("HTTP/1.0 200") != 0) {
-        lastError_ = "Pi status response was not HTTP 200";
+    const auto statusLineEnd = response.find("\r\n");
+    const auto statusLine = response.substr(0, statusLineEnd);
+    const auto statusCodeStart = statusLine.find(' ');
+    if (statusCodeStart == std::string::npos || statusLine.size() < statusCodeStart + 4) {
+        lastError_ = "Pi API response missing HTTP status";
         return std::nullopt;
     }
-    auto body = response.substr(headerEnd + 4);
-    if (body.empty() || body.front() != '{') {
-        lastError_ = "Pi status response body is not JSON";
+    char* parseEnd = nullptr;
+    const auto status = std::strtol(statusLine.c_str() + statusCodeStart + 1, &parseEnd, 10);
+    if (parseEnd == statusLine.c_str() + statusCodeStart + 1 || status < 100 || status > 599) {
+        lastError_ = "Pi API response has invalid HTTP status";
         return std::nullopt;
     }
-    return body;
+    return HttpResponse{static_cast<int>(status), response.substr(headerEnd + 4)};
 }
 
 } // namespace whrepeater

@@ -27,8 +27,15 @@ SignalArbitrator::SignalArbitrator(const RepeaterConfig& config)
 {
 }
 
-std::optional<ActiveInput> SignalArbitrator::choose(const std::vector<ReceiverStatus>& statuses) const
+std::optional<ActiveInput> SignalArbitrator::choose(const std::vector<ReceiverStatus>& statuses)
 {
+    if (activeReceiver_.has_value()) {
+        if (auto active = activeForReceiver(statuses, *activeReceiver_); active.has_value()) {
+            return active;
+        }
+        activeReceiver_.reset();
+    }
+
     std::optional<ReceiverStatus> best;
 
     for (const auto& status : statuses) {
@@ -55,6 +62,7 @@ std::optional<ActiveInput> SignalArbitrator::choose(const std::vector<ReceiverSt
         return std::nullopt;
     }
 
+    activeReceiver_ = best->receiver;
     return ActiveInput{
         .receiver = best->receiver,
         .target = *best->target,
@@ -91,6 +99,23 @@ int SignalArbitrator::receiverPriority(ReceiverId receiver) const
     }
 
     return static_cast<int>(std::distance(config_.receivers.begin(), it));
+}
+
+std::optional<ActiveInput> SignalArbitrator::activeForReceiver(const std::vector<ReceiverStatus>& statuses,
+                                                               ReceiverId receiver) const
+{
+    const auto it = std::ranges::find_if(statuses, [receiver](const ReceiverStatus& status) {
+        return status.receiver == receiver;
+    });
+    if (it == statuses.end() || !isUsable(*it) || !it->target.has_value()) {
+        return std::nullopt;
+    }
+
+    return ActiveInput{
+        .receiver = it->receiver,
+        .target = *it->target,
+        .status = *it,
+    };
 }
 
 } // namespace whrepeater

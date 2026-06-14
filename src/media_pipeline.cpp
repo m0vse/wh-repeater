@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cmath>
 #include <cctype>
+#include <cstdlib>
 #include <cstdint>
 #include <csignal>
 #include <ctime>
@@ -67,6 +68,7 @@ extern "C" {
 #include <libavutil/audio_fifo.h>
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/opt.h>
@@ -225,6 +227,16 @@ struct EncoderOpenResult {
     std::string name;
 };
 
+bool isVaapiEncoder(std::string_view encoderName)
+{
+    return encoderName == "h264_vaapi";
+}
+
+AVPixelFormat softwarePixelFormatForEncoder(const AVCodecContext& codec)
+{
+    return codec.pix_fmt == AV_PIX_FMT_VAAPI ? AV_PIX_FMT_YUV420P : codec.pix_fmt;
+}
+
 void fillBlack(AVFrame& frame)
 {
     for (int y = 0; y < frame.height; ++y) {
@@ -249,6 +261,8 @@ void fillBlue(AVFrame& frame)
 
 void normaliseVideoFrameProperties(AVFrame& frame)
 {
+    frame.pict_type = AV_PICTURE_TYPE_NONE;
+    frame.flags &= ~AV_FRAME_FLAG_KEY;
     frame.sample_aspect_ratio = AVRational{1, 1};
     frame.color_range = AVCOL_RANGE_UNSPECIFIED;
     frame.colorspace = AVCOL_SPC_UNSPECIFIED;
@@ -398,13 +412,17 @@ std::string slateFilter(std::string_view text)
 {
     const auto lines = splitLines(text);
     std::ostringstream filter;
-    filter << "drawtext=fontfile='" << slateFont << "':text='" << escapeDrawText(lines[0])
-           << "':x=(w-text_w)/2:y=120:fontsize=70:fontcolor=white";
-    constexpr std::array<int, 5> bodyY{250, 320, 395, 455, 540};
+    filter << "drawbox=x=90:y=82:w=iw-180:h=ih-164:color=black@0.62:t=fill"
+           << ",drawbox=x=90:y=82:w=iw-180:h=7:color=0xf4d35e@0.90:t=fill"
+           << ",drawtext=fontfile='" << slateFont << "':text='" << escapeDrawText(lines.empty() ? "" : lines[0])
+           << "':x=(w-text_w)/2:y=126:fontsize=76:fontcolor=white";
+    constexpr std::array<int, 7> bodyY{256, 336, 400, 456, 512, 568, 624};
     for (std::size_t index = 1; index < lines.size(); ++index) {
-        const auto y = index - 1 < bodyY.size() ? bodyY[index - 1] : 500 + static_cast<int>(index - bodyY.size()) * 60;
+        const auto y = index - 1 < bodyY.size() ? bodyY[index - 1] : 624 + static_cast<int>(index - bodyY.size()) * 48;
+        const auto fontSize = index == 1 ? 46 : 31;
+        const auto color = index == 1 ? "0xf4d35e" : "white";
         filter << ",drawtext=fontfile='" << slateFont << "':text='" << escapeDrawText(lines[index])
-               << "':x=(w-text_w)/2:y=" << y << ":fontsize=42:fontcolor=white";
+               << "':x=(w-text_w)/2:y=" << y << ":fontsize=" << fontSize << ":fontcolor=" << color;
     }
     return filter.str();
 }
@@ -503,7 +521,6 @@ std::string identText(const RepeaterConfig& config)
 bool isAnalogueInput(const RepeaterConfig& config, const ActiveInput& input)
 {
     return input.receiver == config.analogue.capture.receiver
-        || input.receiver == config.analogue.sd1.receiver
         || (input.status.modulation.has_value() && *input.status.modulation == "SD analogue");
 }
 
@@ -536,13 +553,27 @@ std::string fallbackClockFilter(std::string_view text)
     return filter.str();
 }
 
+void appendInputTitle(std::ostringstream& text, const ActiveInput& input)
+{
+    if (input.receiver.value > 0) {
+        text << "RX" << input.receiver.value;
+        if (!input.target.label.empty()) {
+            text << " " << input.target.label;
+        }
+        return;
+    }
+
+    if (!input.target.label.empty()) {
+        text << input.target.label;
+    } else {
+        text << "Received stream";
+    }
+}
+
 std::string streamInfoText(const ActiveInput& input, std::string_view codec, int width, int height, int frameRate)
 {
     std::ostringstream text;
-    text << "RX" << input.receiver.value;
-    if (!input.target.label.empty()) {
-        text << " " << input.target.label;
-    }
+    appendInputTitle(text, input);
     text << "\n" << input.target.frequencyKhz << " kHz / " << input.target.symbolRateKs << " kS"
          << " | " << codec << " " << width << "x" << height << " " << frameRate << " fps";
     if (input.status.serviceName.has_value() && !input.status.serviceName->empty()) {
@@ -615,10 +646,7 @@ std::string streamInfoText(const ActiveInput& input,
     }
 
     std::ostringstream text;
-    text << "RX" << input.receiver.value;
-    if (!input.target.label.empty()) {
-        text << " " << input.target.label;
-    }
+    appendInputTitle(text, input);
     text << "\n" << input.target.frequencyKhz << " kHz / " << input.target.symbolRateKs << " kS"
          << " | " << codec << " " << width << "x" << height << " " << frameRate << " fps";
     if (serviceName.has_value() && !serviceName->empty()) {
@@ -645,10 +673,7 @@ std::string receivedStreamErrorText(const ActiveInput& input, std::string_view e
     }
 
     std::ostringstream text;
-    text << "RX" << input.receiver.value;
-    if (!input.target.label.empty()) {
-        text << " " << input.target.label;
-    }
+    appendInputTitle(text, input);
     text << "\n" << input.target.frequencyKhz << " kHz / " << input.target.symbolRateKs << " kS";
     if (input.status.modulation.has_value() && !input.status.modulation->empty()) {
         text << " | " << *input.status.modulation;
@@ -945,6 +970,7 @@ int plutoWritePacket(void* opaque, const std::uint8_t* buffer, int size)
 void configureEncoderContext(AVCodecContext& codec,
                              const AVFormatContext& format,
                              const RepeaterConfig& config,
+                             std::string_view encoderName,
                              int width,
                              int height,
                              int frameRate,
@@ -953,20 +979,90 @@ void configureEncoderContext(AVCodecContext& codec,
     codec.codec_type = AVMEDIA_TYPE_VIDEO;
     codec.width = width;
     codec.height = height;
-    codec.pix_fmt = AV_PIX_FMT_YUV420P;
+    if (isVaapiEncoder(encoderName)) {
+        codec.pix_fmt = AV_PIX_FMT_VAAPI;
+    } else if (encoderName == "h264_qsv") {
+        codec.pix_fmt = AV_PIX_FMT_NV12;
+    } else {
+        codec.pix_fmt = AV_PIX_FMT_YUV420P;
+    }
     codec.time_base = AVRational{1, frameRate};
     codec.framerate = AVRational{frameRate, 1};
     codec.gop_size = frameRate * 2;
     codec.max_b_frames = 0;
     codec.bit_rate = static_cast<std::int64_t>(videoBitrateKbps) * 1000;
     codec.rc_max_rate = codec.bit_rate;
-    codec.rc_buffer_size = static_cast<int>(codec.bit_rate / frameRate);
+    codec.rc_buffer_size = isVaapiEncoder(encoderName)
+        ? static_cast<int>(std::min<std::int64_t>(std::numeric_limits<int>::max(), codec.bit_rate * 2))
+        : static_cast<int>(codec.bit_rate / frameRate);
     codec.profile = h264AvProfile(config);
     codec.level = h264AvLevel(config);
     if ((format.oformat->flags & AVFMT_GLOBALHEADER) != 0) {
         codec.flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     }
 }
+
+std::string h264EncoderName(const RepeaterConfig& config)
+{
+    return config.mode == "pc-gateway" ? "libx264" : "h264_v4l2m2m";
+}
+
+std::vector<std::string> h264EncoderCandidates(const RepeaterConfig& config)
+{
+    if (config.mode == "pc-gateway") {
+        return {"h264_vaapi", "libx264"};
+    }
+    return {h264EncoderName(config)};
+}
+
+AVBufferRef* createVaapiDevice()
+{
+    AVBufferRef* rawDevice{};
+    checkAv(av_hwdevice_ctx_create(&rawDevice, AV_HWDEVICE_TYPE_VAAPI, "/dev/dri/renderD128", nullptr, 0),
+            "create VAAPI device");
+    return rawDevice;
+}
+
+AVPixelFormat chooseVaapiPixelFormat(AVCodecContext*, const AVPixelFormat* formats)
+{
+    for (const auto* format = formats; *format != AV_PIX_FMT_NONE; ++format) {
+        if (*format == AV_PIX_FMT_VAAPI) {
+            return *format;
+        }
+    }
+    return formats[0];
+}
+
+void configureVaapiHardwareFrames(AVCodecContext& codec, int width, int height)
+{
+    AVBufferRef* rawDevice = createVaapiDevice();
+    std::unique_ptr<AVBufferRef, decltype([](AVBufferRef* ref) { av_buffer_unref(&ref); })> device{rawDevice};
+
+    AVBufferRef* rawFrames = av_hwframe_ctx_alloc(device.get());
+    if (rawFrames == nullptr) {
+        throw std::runtime_error{"allocate VAAPI frame context failed"};
+    }
+    std::unique_ptr<AVBufferRef, decltype([](AVBufferRef* ref) { av_buffer_unref(&ref); })> frames{rawFrames};
+
+    auto* frameContext = reinterpret_cast<AVHWFramesContext*>(frames->data);
+    frameContext->format = AV_PIX_FMT_VAAPI;
+    frameContext->sw_format = AV_PIX_FMT_NV12;
+    frameContext->width = width;
+    frameContext->height = height;
+    frameContext->initial_pool_size = 16;
+    checkAv(av_hwframe_ctx_init(frames.get()), "initialise VAAPI frame context");
+
+    codec.hw_device_ctx = av_buffer_ref(device.get());
+    if (codec.hw_device_ctx == nullptr) {
+        throw std::runtime_error{"reference VAAPI device failed"};
+    }
+    codec.hw_frames_ctx = av_buffer_ref(frames.get());
+    if (codec.hw_frames_ctx == nullptr) {
+        throw std::runtime_error{"reference VAAPI frames failed"};
+    }
+}
+
+void configureEncoderOptions(AVDictionary*& options, std::string_view encoderName);
 
 bool encoderOpenProbe(std::string_view encoderName,
                       const AVFormatContext& format,
@@ -1009,12 +1105,17 @@ bool encoderOpenProbe(std::string_view encoderName,
         if (codec == nullptr) {
             _exit(2);
         }
-        configureEncoderContext(*codec, format, config, width, height, frameRate, videoBitrateKbps);
-        AVDictionary* options = nullptr;
-        if (encoderName == "libx264") {
-            av_dict_set(&options, "preset", "veryfast", 0);
-            av_dict_set(&options, "tune", "zerolatency", 0);
+        configureEncoderContext(*codec, format, config, encoderName, width, height, frameRate, videoBitrateKbps);
+        if (isVaapiEncoder(encoderName)) {
+            try {
+                configureVaapiHardwareFrames(*codec, width, height);
+            } catch (...) {
+                avcodec_free_context(&codec);
+                _exit(2);
+            }
         }
+        AVDictionary* options = nullptr;
+        configureEncoderOptions(options, encoderName);
         const auto status = avcodec_open2(codec, encoder, &options);
         av_dict_free(&options);
         avcodec_free_context(&codec);
@@ -1042,6 +1143,21 @@ bool encoderOpenProbe(std::string_view encoderName,
     return false;
 }
 
+void configureEncoderOptions(AVDictionary*& options, std::string_view encoderName)
+{
+    if (encoderName == "libx264") {
+        av_dict_set(&options, "preset", "veryfast", 0);
+        av_dict_set(&options, "tune", "zerolatency", 0);
+    } else if (encoderName == "h264_v4l2m2m") {
+        av_dict_set(&options, "repeat_sequence_header", "1", 0);
+    } else if (encoderName == "h264_qsv") {
+        av_dict_set(&options, "preset", "veryfast", 0);
+        av_dict_set(&options, "forced_idr", "1", 0);
+    } else if (isVaapiEncoder(encoderName)) {
+        av_dict_set(&options, "aud", "1", 0);
+    }
+}
+
 EncoderOpenResult openH264Encoder(const AVFormatContext& format,
                                   const RepeaterConfig& config,
                                   int width,
@@ -1051,32 +1167,46 @@ EncoderOpenResult openH264Encoder(const AVFormatContext& format,
 {
     std::string errors;
 
-    constexpr std::string_view encoderName{"h264_v4l2m2m"};
-    const auto* encoder = avcodec_find_encoder_by_name(std::string{encoderName}.c_str());
-    if (encoder == nullptr) {
-        throw std::runtime_error{"hardware H.264 encoder h264_v4l2m2m is not available"};
-    }
-    if (!encoderOpenProbe(encoderName, format, config, width, height, frameRate, videoBitrateKbps, std::chrono::seconds{5})) {
-        throw std::runtime_error{"hardware H.264 encoder h264_v4l2m2m probe failed or timed out"};
+    for (const auto& encoderName : h264EncoderCandidates(config)) {
+        const auto* encoder = avcodec_find_encoder_by_name(encoderName.c_str());
+        if (encoder == nullptr) {
+            errors += encoderName + ": not available; ";
+            continue;
+        }
+        if (!encoderOpenProbe(encoderName, format, config, width, height, frameRate, videoBitrateKbps, std::chrono::seconds{5})) {
+            errors += encoderName + ": probe failed or timed out; ";
+            continue;
+        }
+
+        AVCodecContext* codec = avcodec_alloc_context3(encoder);
+        if (codec == nullptr) {
+            errors += encoderName + ": allocate context failed; ";
+            continue;
+        }
+        configureEncoderContext(*codec, format, config, encoderName, width, height, frameRate, videoBitrateKbps);
+        if (isVaapiEncoder(encoderName)) {
+            try {
+                configureVaapiHardwareFrames(*codec, width, height);
+            } catch (const std::exception& ex) {
+                errors += encoderName + ": " + ex.what() + "; ";
+                avcodec_free_context(&codec);
+                continue;
+            }
+        }
+
+        AVDictionary* options = nullptr;
+        configureEncoderOptions(options, encoderName);
+        const auto status = avcodec_open2(codec, encoder, &options);
+        av_dict_free(&options);
+        if (status >= 0) {
+            return EncoderOpenResult{codec, encoder, encoderName};
+        }
+
+        errors += encoderName + ": " + avError(status) + "; ";
+        avcodec_free_context(&codec);
     }
 
-    AVCodecContext* codec = avcodec_alloc_context3(encoder);
-    if (codec == nullptr) {
-        throw std::runtime_error{"allocate hardware H.264 encoder failed"};
-    }
-    configureEncoderContext(*codec, format, config, width, height, frameRate, videoBitrateKbps);
-
-    AVDictionary* options = nullptr;
-    av_dict_set(&options, "repeat_sequence_header", "1", 0);
-    const auto status = avcodec_open2(codec, encoder, &options);
-    av_dict_free(&options);
-    if (status >= 0) {
-        return EncoderOpenResult{codec, encoder, std::string{encoderName}};
-    }
-
-    errors += std::string{encoderName} + ": " + avError(status) + "; ";
-    avcodec_free_context(&codec);
-    throw std::runtime_error{"open hardware H.264 encoder failed: " + errors};
+    throw std::runtime_error{"open H.264 encoder failed: " + errors};
 }
 
 EncoderOpenResult openFallbackEncoder(const RepeaterConfig& config, const AVFormatContext& format, int frameRate, int videoBitrateKbps)
@@ -1623,6 +1753,64 @@ using CodecContextPtr = std::unique_ptr<AVCodecContext, AvCodecContextDeleter>;
 using SwsContextPtr = std::unique_ptr<SwsContext, SwsContextDeleter>;
 using SwrContextPtr = std::unique_ptr<SwrContext, SwrContextDeleter>;
 using AudioFifoPtr = std::unique_ptr<AVAudioFifo, AvAudioFifoDeleter>;
+
+FramePtr convertFrameFormat(AVFrame* frame, AVPixelFormat format, SwsContextPtr& scaler)
+{
+    FramePtr converted{av_frame_alloc()};
+    if (!converted) {
+        throw std::runtime_error{"allocate converted encoder frame failed"};
+    }
+    converted->format = format;
+    converted->width = frame->width;
+    converted->height = frame->height;
+    converted->pts = frame->pts;
+    checkAv(av_frame_get_buffer(converted.get(), 32), "allocate converted encoder frame buffer");
+    checkAv(av_frame_make_writable(converted.get()), "make converted encoder frame writable");
+
+    if (!scaler) {
+        scaler.reset(sws_getContext(frame->width,
+                                    frame->height,
+                                    static_cast<AVPixelFormat>(frame->format),
+                                    frame->width,
+                                    frame->height,
+                                    format,
+                                    SWS_FAST_BILINEAR,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr));
+        if (!scaler) {
+            throw std::runtime_error{"create encoder upload scaler failed"};
+        }
+    }
+    sws_scale(scaler.get(), frame->data, frame->linesize, 0, frame->height, converted->data, converted->linesize);
+    normaliseVideoFrameProperties(*converted);
+    return converted;
+}
+
+FramePtr uploadVaapiFrame(AVCodecContext& codec, AVFrame* frame, SwsContextPtr& scaler)
+{
+    if (codec.hw_frames_ctx == nullptr) {
+        throw std::runtime_error{"VAAPI encoder has no frame context"};
+    }
+
+    FramePtr converted;
+    AVFrame* uploadSource = frame;
+    if (static_cast<AVPixelFormat>(frame->format) != AV_PIX_FMT_NV12) {
+        converted = convertFrameFormat(frame, AV_PIX_FMT_NV12, scaler);
+        uploadSource = converted.get();
+    }
+
+    FramePtr hardware{av_frame_alloc()};
+    if (!hardware) {
+        throw std::runtime_error{"allocate VAAPI encoder frame failed"};
+    }
+    checkAv(av_hwframe_get_buffer(codec.hw_frames_ctx, hardware.get(), 0), "allocate VAAPI encoder frame");
+    checkAv(av_hwframe_transfer_data(hardware.get(), uploadSource, 0), "upload VAAPI encoder frame");
+    hardware->pts = frame->pts;
+    hardware->duration = frame->duration;
+    hardware->sample_aspect_ratio = frame->sample_aspect_ratio;
+    return hardware;
+}
 
 bool isImageFile(const std::filesystem::path& path)
 {
@@ -2466,7 +2654,7 @@ public:
 
     [[nodiscard]] AVPixelFormat pixelFormat() const
     {
-        return codec_->pix_fmt;
+        return softwarePixelFormatForEncoder(*codec_);
     }
 
     [[nodiscard]] int width() const
@@ -2502,7 +2690,13 @@ public:
         if (streamInfoOverlay_ != nullptr && overlayFrame->pts < static_cast<std::int64_t>(std::max(1, frameRate_) * 10)) {
             overlayFrame = streamInfoOverlay_->render(overlayFrame.get());
         }
-        checkAv(avcodec_send_frame(codec_, overlayFrame.get()), "send transcode frame");
+        FramePtr hardwareFrame;
+        AVFrame* encoderFrame = overlayFrame.get();
+        if (codec_->pix_fmt == AV_PIX_FMT_VAAPI) {
+            hardwareFrame = uploadVaapiFrame(*codec_, overlayFrame.get(), encoderUploadScaler_);
+            encoderFrame = hardwareFrame.get();
+        }
+        checkAv(avcodec_send_frame(codec_, encoderFrame), "send transcode frame");
         drainPackets();
     }
 
@@ -2542,7 +2736,7 @@ private:
         if (!frame) {
             throw std::runtime_error{"allocate generated live frame failed"};
         }
-        frame->format = codec_->pix_fmt;
+        frame->format = softwarePixelFormatForEncoder(*codec_);
         frame->width = codec_->width;
         frame->height = codec_->height;
         frame->pts = pts;
@@ -2558,7 +2752,7 @@ private:
         const auto pts = lastVideoPts_ == AV_NOPTS_VALUE ? 0 : lastVideoPts_ + 1;
 
         const bool valid = frame != nullptr
-            && frame->format == codec_->pix_fmt
+            && frame->format == softwarePixelFormatForEncoder(*codec_)
             && frame->width == codec_->width
             && frame->height == codec_->height
             && frame->data[0] != nullptr
@@ -2650,13 +2844,13 @@ private:
         identOverlay_ = std::make_unique<OverlayRenderer>(identFilter(identText(config_)),
                                                           codec_->width,
                                                           codec_->height,
-                                                          codec_->pix_fmt,
+                                                          softwarePixelFormatForEncoder(*codec_),
                                                           frameRate);
         if (streamInfo_.has_value() && !streamInfo_->empty()) {
             streamInfoOverlay_ = std::make_unique<OverlayRenderer>(streamInfoFilter(*streamInfo_, frameRate),
                                                                    codec_->width,
                                                                    codec_->height,
-                                                                   codec_->pix_fmt,
+                                                                   softwarePixelFormatForEncoder(*codec_),
                                                                    frameRate);
         }
         std::cout << "media pipeline transcoding received video to H.264 with encoder "
@@ -2789,6 +2983,7 @@ private:
     AVStream* audioStream_{nullptr};
     std::unique_ptr<OverlayRenderer> identOverlay_;
     std::unique_ptr<OverlayRenderer> streamInfoOverlay_;
+    SwsContextPtr encoderUploadScaler_;
     std::uint8_t* avioBuffer_{nullptr};
     bool headerWritten_{false};
     bool flushed_{false};
@@ -3004,6 +3199,7 @@ private:
                               audioResampler,
                               audioFifo,
                               audioPts);
+            flushAudioResampler(audioResampler, convertedAudioFrame.get(), audioFifo, audioPts);
             discardPartialAudioFifo(audioFifo);
         }
     }
@@ -3086,16 +3282,11 @@ private:
                                         stream);
         }
 
-        bool changed = false;
         {
             std::lock_guard lock{streamInfoMutex_};
-            changed = streamInfo_ != streamInfo;
-            if (changed) {
+            if (streamInfo_ != streamInfo) {
                 streamInfo_ = streamInfo;
             }
-        }
-        if (changed) {
-            output_.setStreamInfo(streamInfo);
         }
     }
 
@@ -3313,6 +3504,55 @@ private:
         }
     }
 
+    void flushAudioResampler(SwrContextPtr& resampler,
+                             AVFrame* convertedFrame,
+                             AudioFifoPtr& fifo,
+                             std::int64_t& audioPts)
+    {
+        auto* audioCodec = output_.audioCodec();
+        if (audioCodec == nullptr || !resampler || !fifo) {
+            return;
+        }
+
+        for (;;) {
+            const auto delay = swr_get_delay(resampler.get(), audioCodec->sample_rate);
+            if (delay <= 0) {
+                break;
+            }
+            const auto maxOutputSamples = static_cast<int>(av_rescale_rnd(delay,
+                                                                          audioCodec->sample_rate,
+                                                                          audioCodec->sample_rate,
+                                                                          AV_ROUND_UP));
+            if (maxOutputSamples <= 0) {
+                break;
+            }
+
+            av_frame_unref(convertedFrame);
+            convertedFrame->format = audioCodec->sample_fmt;
+            convertedFrame->sample_rate = audioCodec->sample_rate;
+            convertedFrame->nb_samples = maxOutputSamples;
+            checkAv(av_channel_layout_copy(&convertedFrame->ch_layout, &audioCodec->ch_layout), "copy flushed live audio layout");
+            checkAv(av_frame_get_buffer(convertedFrame, 0), "allocate flushed live audio frame");
+
+            const auto convertedSamples = swr_convert(resampler.get(),
+                                                      convertedFrame->extended_data,
+                                                      convertedFrame->nb_samples,
+                                                      nullptr,
+                                                      0);
+            checkAv(convertedSamples, "flush live audio resampler");
+            if (convertedSamples <= 0) {
+                break;
+            }
+
+            checkAv(av_audio_fifo_realloc(fifo.get(), av_audio_fifo_size(fifo.get()) + convertedSamples),
+                    "grow flushed live audio FIFO");
+            if (av_audio_fifo_write(fifo.get(), reinterpret_cast<void**>(convertedFrame->extended_data), convertedSamples) < convertedSamples) {
+                throw std::runtime_error{"write flushed live audio FIFO failed"};
+            }
+            drainAudioFifo(fifo, audioPts, false);
+        }
+    }
+
     void discardPartialAudioFifo(AudioFifoPtr& fifo)
     {
         if (fifo && av_audio_fifo_size(fifo.get()) > 0) {
@@ -3332,6 +3572,9 @@ private:
         if (sendStatus == AVERROR(EAGAIN)) {
             decodedFrames += drainDecoder(decoder, frame, convertedFrame, scaler, frameIndex);
             const auto retryStatus = avcodec_send_packet(decoder, packet);
+            if (retryStatus == AVERROR(EAGAIN)) {
+                return decodedFrames;
+            }
             if (retryStatus == AVERROR_INVALIDDATA) {
                 return decodedFrames;
             }
@@ -3386,9 +3629,6 @@ private:
         }
         const auto now = std::chrono::steady_clock::now();
         if (lastDecodedFrameAt == std::chrono::steady_clock::time_point{}) {
-            if (now - videoDecodeStartedAt > liveVideoAcquisitionTimeout) {
-                throw std::runtime_error{"no valid decoded video frames in received stream"};
-            }
             return;
         }
         constexpr auto liveVideoStallTimeout = std::chrono::seconds{3};
@@ -3540,24 +3780,52 @@ private:
 
         const auto* decoder = softwareDecoder;
         bool usingHardwareDecoder = false;
+        bool usingVaapiHardwareDecoder = false;
         if (config_.fallback.hardwareDecode) {
-            const auto decision = chooseFallbackHardwareDecoder(config_, *videoStream);
-            if (decision.decoder != nullptr) {
-                decoder = decision.decoder;
-                usingHardwareDecoder = true;
-                std::cout << "media pipeline fallback hardware decode candidate accepted: " << decision.reason << '\n';
-            } else {
-                std::cout << "media pipeline fallback hardware decode skipped: " << decision.reason << '\n';
+            if (config_.mode == "pc-gateway"
+                && codecId == AV_CODEC_ID_H264
+                && videoStream->codecpar != nullptr
+                && videoStream->codecpar->width == outputWidth(config_)
+                && videoStream->codecpar->height == outputHeight(config_)) {
+                try {
+                    AVBufferRef* probeDevice = createVaapiDevice();
+                    av_buffer_unref(&probeDevice);
+                    usingHardwareDecoder = true;
+                    usingVaapiHardwareDecoder = true;
+                    std::cout << "media pipeline fallback VAAPI decode candidate accepted: H.264 "
+                              << videoStream->codecpar->width << "x" << videoStream->codecpar->height << '\n';
+                } catch (const std::exception& ex) {
+                    std::cout << "media pipeline fallback VAAPI decode skipped: " << ex.what() << '\n';
+                }
+            }
+            if (!usingVaapiHardwareDecoder) {
+                const auto decision = chooseFallbackHardwareDecoder(config_, *videoStream);
+                if (decision.decoder != nullptr) {
+                    decoder = decision.decoder;
+                    usingHardwareDecoder = true;
+                    std::cout << "media pipeline fallback hardware decode candidate accepted: " << decision.reason << '\n';
+                } else {
+                    std::cout << "media pipeline fallback hardware decode skipped: " << decision.reason << '\n';
+                }
             }
         }
 
-        const auto openVideoDecoder = [&](const AVCodec* selectedDecoder, std::string_view label) {
+        const auto openVideoDecoder = [&](const AVCodec* selectedDecoder, std::string_view label, bool vaapiDecode) {
             CodecContextPtr context{avcodec_alloc_context3(selectedDecoder)};
             if (!context) {
                 throw std::runtime_error{"allocate fallback " + std::string{label} + " video decoder failed"};
             }
             checkAv(avcodec_parameters_to_context(context.get(), videoStream->codecpar),
                     "copy fallback " + std::string{label} + " video parameters");
+            if (vaapiDecode) {
+                context->get_format = chooseVaapiPixelFormat;
+                AVBufferRef* rawDevice = createVaapiDevice();
+                context->hw_device_ctx = av_buffer_ref(rawDevice);
+                av_buffer_unref(&rawDevice);
+                if (context->hw_device_ctx == nullptr) {
+                    throw std::runtime_error{"reference fallback VAAPI decode device failed"};
+                }
+            }
             const auto status = avcodec_open2(context.get(), selectedDecoder, nullptr);
             if (status < 0) {
                 throw std::runtime_error{"open fallback " + std::string{label} + " video decoder "
@@ -3568,7 +3836,7 @@ private:
 
         CodecContextPtr decoderContext;
         try {
-            decoderContext = openVideoDecoder(decoder, usingHardwareDecoder ? "hardware" : "software");
+            decoderContext = openVideoDecoder(decoder, usingHardwareDecoder ? "hardware" : "software", usingVaapiHardwareDecoder);
         } catch (const std::exception& ex) {
             if (!usingHardwareDecoder) {
                 throw;
@@ -3577,7 +3845,8 @@ private:
                       << ex.what() << '\n';
             decoder = softwareDecoder;
             usingHardwareDecoder = false;
-            decoderContext = openVideoDecoder(decoder, "software");
+            usingVaapiHardwareDecoder = false;
+            decoderContext = openVideoDecoder(decoder, "software", false);
         }
 
         auto audioStreamIndex = av_find_best_stream(inputFormat.get(), AVMEDIA_TYPE_AUDIO, -1, videoStreamIndex, nullptr, 0);
@@ -3702,6 +3971,7 @@ private:
                               audioFifo,
                               output_,
                               audioPts);
+            flushAudioResampler(audioResampler, convertedAudioFrame.get(), audioFifo, output_, audioPts);
             flushAudioFifo(audioFifo, output_, audioPts);
         }
     }
@@ -3777,11 +4047,15 @@ private:
                                       fallbackSourceFrameRate,
                                       decodedVideoFrames,
                                       firstVideoSeconds,
-                                      lastVideoPts,
                                       frameIndex);
-            outputMuxer.submitVideoFrame(convertFrame(frame, convertedFrame, scaler, outputMuxer, streamSampleAspect, pts), "fallback-video");
             ++decodedVideoFrames;
-            frameIndex = std::max(frameIndex + 1, pts + 1);
+            if (pts <= lastVideoPts) {
+                av_frame_unref(frame);
+                continue;
+            }
+            lastVideoPts = pts;
+            outputMuxer.submitVideoFrame(convertFrame(frame, convertedFrame, scaler, outputMuxer, streamSampleAspect, pts), "fallback-video");
+            frameIndex = pts + 1;
             av_frame_unref(frame);
             if (stopping_.load()) {
                 break;
@@ -3795,7 +4069,6 @@ private:
                                 double fallbackSourceFrameRate,
                                 std::int64_t decodedVideoFrames,
                                 std::optional<double>& firstVideoSeconds,
-                                std::int64_t& lastVideoPts,
                                 std::int64_t fallbackFrameIndex)
     {
         std::int64_t pts = fallbackFrameIndex;
@@ -3814,11 +4087,7 @@ private:
                                                         * static_cast<double>(outputMuxer.frameRate())
                                                         / fallbackSourceFrameRate));
         }
-        if (pts <= lastVideoPts) {
-            pts = lastVideoPts + 1;
-        }
-        lastVideoPts = pts;
-        return pts;
+        return std::max<std::int64_t>(0, pts);
     }
 
     AVFrame* convertFrame(AVFrame* frame,
@@ -3828,6 +4097,19 @@ private:
                           AVRational streamSampleAspect,
                           std::int64_t pts)
     {
+        if (static_cast<AVPixelFormat>(frame->format) == AV_PIX_FMT_VAAPI) {
+            av_frame_unref(convertedFrame);
+            convertedFrame->format = outputMuxer.pixelFormat();
+            convertedFrame->width = frame->width;
+            convertedFrame->height = frame->height;
+            checkAv(av_frame_get_buffer(convertedFrame, 32), "allocate fallback VAAPI download frame");
+            checkAv(av_hwframe_transfer_data(convertedFrame, frame, 0), "download fallback VAAPI frame");
+            convertedFrame->pts = frame->pts;
+            convertedFrame->sample_aspect_ratio = frame->sample_aspect_ratio;
+            normaliseVideoFrameProperties(*convertedFrame);
+            frame = convertedFrame;
+        }
+
         const auto sampleAspect = validSampleAspect(frame->sample_aspect_ratio, streamSampleAspect);
         const auto sourceFormat = normalisedPixelFormat(static_cast<AVPixelFormat>(frame->format));
         if (frame->width == outputMuxer.width()
@@ -4032,6 +4314,56 @@ private:
         drainAudioFifo(fifo, outputMuxer, audioPts, true);
     }
 
+    void flushAudioResampler(SwrContextPtr& resampler,
+                             AVFrame* convertedFrame,
+                             AudioFifoPtr& fifo,
+                             EncodedOutputSink& outputMuxer,
+                             std::int64_t& audioPts)
+    {
+        auto* audioCodec = outputMuxer.audioCodec();
+        if (audioCodec == nullptr || !resampler || !fifo) {
+            return;
+        }
+
+        for (;;) {
+            const auto delay = swr_get_delay(resampler.get(), audioCodec->sample_rate);
+            if (delay <= 0) {
+                break;
+            }
+            const auto maxOutputSamples = static_cast<int>(av_rescale_rnd(delay,
+                                                                          audioCodec->sample_rate,
+                                                                          audioCodec->sample_rate,
+                                                                          AV_ROUND_UP));
+            if (maxOutputSamples <= 0) {
+                break;
+            }
+
+            av_frame_unref(convertedFrame);
+            convertedFrame->format = audioCodec->sample_fmt;
+            convertedFrame->sample_rate = audioCodec->sample_rate;
+            convertedFrame->nb_samples = maxOutputSamples;
+            checkAv(av_channel_layout_copy(&convertedFrame->ch_layout, &audioCodec->ch_layout), "copy flushed fallback audio layout");
+            checkAv(av_frame_get_buffer(convertedFrame, 0), "allocate flushed fallback audio frame");
+
+            const auto convertedSamples = swr_convert(resampler.get(),
+                                                      convertedFrame->extended_data,
+                                                      convertedFrame->nb_samples,
+                                                      nullptr,
+                                                      0);
+            checkAv(convertedSamples, "flush fallback audio resampler");
+            if (convertedSamples <= 0) {
+                break;
+            }
+
+            checkAv(av_audio_fifo_realloc(fifo.get(), av_audio_fifo_size(fifo.get()) + convertedSamples),
+                    "grow flushed fallback audio FIFO");
+            if (av_audio_fifo_write(fifo.get(), reinterpret_cast<void**>(convertedFrame->extended_data), convertedSamples) < convertedSamples) {
+                throw std::runtime_error{"write flushed fallback audio FIFO failed"};
+            }
+            drainAudioFifo(fifo, outputMuxer, audioPts, false);
+        }
+    }
+
     RepeaterConfig config_;
     EncodedOutputSink& output_;
     std::filesystem::path path_;
@@ -4177,7 +4509,7 @@ private:
             av_packet_unref(packet.get());
         }
 
-        checkAv(avcodec_send_packet(decoderContext.get(), nullptr), "flush SD1 analogue decoder");
+        checkAv(avcodec_send_packet(decoderContext.get(), nullptr), "flush analogue decoder");
         drainDecoder(decoderContext.get(), frame.get(), convertedFrame.get(), scaler, output_, captureStartedAt, lastFramePts);
     }
 
@@ -5059,12 +5391,24 @@ public:
     void setStreamInfo(std::optional<std::string> streamInfo) override
     {
         std::lock_guard lock{outputMutex_};
-        if (streamInfo_ == streamInfo) {
+        setStreamInfoLocked(std::move(streamInfo), false);
+    }
+
+    void setLiveStreamInfo(std::optional<std::string> streamInfo)
+    {
+        std::lock_guard lock{outputMutex_};
+        setStreamInfoLocked(std::move(streamInfo), true);
+    }
+
+    void setStreamInfoLocked(std::optional<std::string> streamInfo, bool submittedVideoOnly)
+    {
+        if (streamInfo_ == streamInfo && streamInfoSubmittedVideoOnly_ == submittedVideoOnly) {
             return;
         }
         streamInfo_ = std::move(streamInfo);
+        streamInfoSubmittedVideoOnly_ = submittedVideoOnly;
         streamInfoOverlay_.reset();
-        liveInfoFramesRemaining_ = streamInfo_.has_value() && !streamInfo_->empty() ? std::max(1, frameRate_) * 10 : 0;
+        liveInfoFramesRemaining_ = streamInfo_.has_value() && !streamInfo_->empty() ? std::max(1, frameRate_) * 4 : 0;
         cachedComposited_.reset();
     }
 
@@ -5450,7 +5794,10 @@ private:
         clockFrame->pts = frameIndex;
         auto* finalFrame = clockFrame.get();
         FramePtr streamInfoFrame;
-        if (streamInfo_.has_value() && !streamInfo_->empty()) {
+        if (!streamInfoSubmittedVideoOnly_
+            && !notice_.has_value()
+            && streamInfo_.has_value()
+            && !streamInfo_->empty()) {
             if (!streamInfoOverlay_) {
                 streamInfoOverlay_ = std::make_unique<OverlayRenderer>(streamInfoFilter(*streamInfo_, frameRate_),
                                                                         outputWidthPixels(),
@@ -5563,7 +5910,11 @@ private:
         const auto videoBitrateKbps = fallbackVideoBitrateKbps(config_);
         auto encoder = openFallbackEncoder(config_, *format_, frameRate_, videoBitrateKbps);
         codec_ = encoder.context;
-        identOverlay_ = std::make_unique<OverlayRenderer>(identFilter(identText(config_)), codec_->width, codec_->height, codec_->pix_fmt, frameRate_);
+        identOverlay_ = std::make_unique<OverlayRenderer>(identFilter(identText(config_)),
+                                                          codec_->width,
+                                                          codec_->height,
+                                                          outputPixelFormat(),
+                                                          frameRate_);
         std::cout << "media pipeline using H.264 encoder " << encoder.name
                   << " at " << codec_->width << "x" << codec_->height
                   << " " << frameRate_ << " fps\n";
@@ -5641,7 +5992,13 @@ private:
             return;
         }
 #endif
-        checkAv(avcodec_send_frame(codec_, safeFrame), "send output frame");
+        FramePtr hardwareFrame;
+        AVFrame* encoderFrame = safeFrame;
+        if (codec_->pix_fmt == AV_PIX_FMT_VAAPI) {
+            hardwareFrame = uploadVaapiFrame(*codec_, safeFrame, encoderUploadScaler_);
+            encoderFrame = hardwareFrame.get();
+        }
+        checkAv(avcodec_send_frame(codec_, encoderFrame), "send output frame");
         PacketPtr packet{av_packet_alloc()};
         if (!packet) {
             throw std::runtime_error{"allocate fallback packet failed"};
@@ -5697,6 +6054,7 @@ private:
             generatedFrame = generatedVideoFrame(pts);
             return generatedFrame.get();
         }
+        lastVideoPts_ = pts;
         frame->pts = pts;
         normaliseVideoFrameProperties(*frame);
         return frame;
@@ -5945,7 +6303,7 @@ private:
             return gstMuxer_->pixelFormat();
         }
 #endif
-        return codec_ != nullptr ? codec_->pix_fmt : AV_PIX_FMT_YUV420P;
+        return codec_ != nullptr ? softwarePixelFormatForEncoder(*codec_) : AV_PIX_FMT_YUV420P;
     }
 
     const RepeaterConfig& config_;
@@ -5963,8 +6321,10 @@ private:
     std::unique_ptr<OverlayRenderer> identOverlay_;
     std::unique_ptr<OverlayRenderer> clockOverlay_;
     std::unique_ptr<OverlayRenderer> streamInfoOverlay_;
+    SwsContextPtr encoderUploadScaler_;
     std::int64_t clockSecondIndex_{-1};
     std::optional<std::string> streamInfo_;
+    bool streamInfoSubmittedVideoOnly_{false};
     int liveInfoFramesRemaining_{0};
     FramePtr cachedComposited_;
     const AVFrame* cachedCompositedIdentity_{};
@@ -6040,6 +6400,8 @@ void MediaPipeline::select(std::optional<ActiveInput> input)
     active_ = std::move(input);
     if (!active_.has_value()) {
         streamIndicator_.reset();
+        sessionStreamInfo_.reset();
+        pendingSessionStreamInfo_.reset();
         liveRetryAfter_ = {};
     }
 }
@@ -6071,6 +6433,11 @@ void MediaPipeline::stopFallbackVideo()
     }
     fallbackVideoPath_.reset();
     enterFallback(std::chrono::steady_clock::now(), beaconAllowed_ || accessNotice_.has_value());
+}
+
+void MediaPipeline::setPreviewEnabled(bool enabled)
+{
+    output_.setPreviewEnabled(enabled);
 }
 
 void MediaPipeline::tick(std::chrono::steady_clock::time_point now)
@@ -6132,6 +6499,24 @@ MediaPipelineMode MediaPipeline::mode() const
     return mode_;
 }
 
+std::optional<std::string> MediaPipeline::takeStreamInfoUpdate()
+{
+    std::lock_guard lock{mutex_};
+    auto update = std::move(pendingSessionStreamInfo_);
+    pendingSessionStreamInfo_.reset();
+    return update;
+}
+
+void MediaPipeline::setSessionStreamInfo(std::optional<std::string> streamInfo)
+{
+    std::lock_guard lock{mutex_};
+    if (sessionStreamInfo_ == streamInfo) {
+        return;
+    }
+    sessionStreamInfo_ = streamInfo;
+    pendingSessionStreamInfo_ = std::move(streamInfo);
+}
+
 void MediaPipeline::ensureLibavReady()
 {
     avdevice_register_all();
@@ -6147,8 +6532,19 @@ void MediaPipeline::ensureLibavReady()
         throw std::runtime_error{"libav has no MPEG-2, H.264, or H.265 decoder available"};
     }
 
-    if (avcodec_find_encoder_by_name("h264_v4l2m2m") == nullptr) {
-        throw std::runtime_error{"libav has no hardware H.264 encoder h264_v4l2m2m available"};
+    bool h264EncoderAvailable = false;
+    std::string h264EncoderNames;
+    for (const auto& encoderName : h264EncoderCandidates(config_)) {
+        if (!h264EncoderNames.empty()) {
+            h264EncoderNames += ", ";
+        }
+        h264EncoderNames += encoderName;
+        if (avcodec_find_encoder_by_name(encoderName.c_str()) != nullptr) {
+            h264EncoderAvailable = true;
+        }
+    }
+    if (!h264EncoderAvailable) {
+        throw std::runtime_error{"libav has no usable H.264 encoder candidate: " + h264EncoderNames};
     }
     if (avcodec_find_encoder(AV_CODEC_ID_AAC) == nullptr) {
         throw std::runtime_error{"libav has no AAC encoder available"};
@@ -6258,6 +6654,8 @@ void MediaPipeline::workerLoop()
     auto nextFrameAt = std::chrono::steady_clock::now();
     auto nextSlowOutputLogAt = std::chrono::steady_clock::time_point{};
     std::chrono::steady_clock::time_point liveAttemptStartedAt{};
+    bool liveAcquisitionWarningLogged = false;
+    bool liveStreamInfoShown = false;
     auto advanceFrameClock = [](std::chrono::steady_clock::time_point& nextFrame,
                                 std::chrono::microseconds frameInterval) {
         nextFrame += frameInterval;
@@ -6286,6 +6684,7 @@ void MediaPipeline::workerLoop()
             gstLiveTranscoder.reset();
         }
 #endif
+        liveStreamInfoShown = false;
     };
 
     while (true) {
@@ -6331,7 +6730,7 @@ void MediaPipeline::workerLoop()
                 } else {
                     fallbackMuxer->setNotice(std::nullopt);
                 }
-                fallbackMuxer->setStreamInfo(streamIndicator);
+                fallbackMuxer->setStreamInfo(notice.has_value() ? std::nullopt : streamIndicator);
                 std::this_thread::sleep_until(nextFrameAt);
                 fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
                 fallbackMuxer->writeFrame(fallbackFrameIndex++);
@@ -6468,6 +6867,7 @@ void MediaPipeline::workerLoop()
                 if (!liveTranscoder) {
                     liveTranscoder = std::make_unique<LiveTranscoder>(config_, *fallbackMuxer, active);
                     liveAttemptStartedAt = std::chrono::steady_clock::now();
+                    liveAcquisitionWarningLogged = false;
                 }
                 std::vector<std::byte> queued;
                 bool liveFinished{};
@@ -6506,18 +6906,18 @@ void MediaPipeline::workerLoop()
                     ;
                 if (!liveReady && !liveFinished && liveAttemptStartedAt != std::chrono::steady_clock::time_point{}
                     && std::chrono::steady_clock::now() - liveAttemptStartedAt > liveVideoAcquisitionTimeout) {
-                    liveFinished = true;
                     liveError = "no valid decoded video after "
                         + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(liveVideoAcquisitionTimeout).count())
                         + " seconds";
-                    if (liveTranscoder) {
-                        liveTranscoder->stop();
+                    if (!liveAcquisitionWarningLogged) {
+                        std::cerr << "wh-repeater: received stream not decodable yet; continuing to wait"
+                                  << ": " << liveError << '\n';
+                        liveAcquisitionWarningLogged = true;
                     }
-#if defined(WH_REPEATER_HAVE_GSTREAMER)
-                    if (gstLiveTranscoder) {
-                        gstLiveTranscoder->stop();
+                    if (active.has_value()) {
+                        streamIndicator_ = receivedStreamErrorText(*active, liveError);
                     }
-#endif
+                    liveAttemptStartedAt = std::chrono::steady_clock::now();
                 }
                 if (liveFinished) {
                     if (liveError.empty() && liveTranscoder) {
@@ -6539,6 +6939,8 @@ void MediaPipeline::workerLoop()
                     output_.setTransmitEnabled(true);
                     inputQueue_.clear();
                     inputReady_.notify_all();
+                } else if (liveReady) {
+                    liveAcquisitionWarningLogged = false;
                 }
                 if (!inputQueue_.empty()) {
                     queued.insert(queued.end(), inputQueue_.begin(), inputQueue_.end());
@@ -6567,14 +6969,25 @@ void MediaPipeline::workerLoop()
                             || std::chrono::steady_clock::now() - lastLiveFrameAt > liveFillTimeout;
                     }
                     if (liveVideoStale) {
-                        fallbackMuxer->setNotice(std::nullopt);
-                        if (active.has_value()) {
+                        if (notice.has_value()) {
+                            fallbackMuxer->setNotice(notice);
+                            fallbackMuxer->setStreamInfo(std::nullopt);
+                        } else if (active.has_value()) {
+                            fallbackMuxer->setNotice(std::nullopt);
                             fallbackMuxer->setStreamInfo(receivedStreamErrorText(*active, "waiting for live video frame"));
+                        } else {
+                            fallbackMuxer->setNotice(std::nullopt);
+                            fallbackMuxer->setStreamInfo(std::nullopt);
                         }
                     } else {
                         fallbackMuxer->setNotice(std::nullopt);
-                        if (liveTranscoder) {
-                            fallbackMuxer->setStreamInfo(liveTranscoder->streamInfo());
+                        if (liveTranscoder && !liveStreamInfoShown) {
+                            const auto liveStreamInfo = liveTranscoder->streamInfo();
+                            if (liveStreamInfo.has_value() && !liveStreamInfo->empty()) {
+                                setSessionStreamInfo(liveStreamInfo);
+                                fallbackMuxer->setLiveStreamInfo(liveStreamInfo);
+                                liveStreamInfoShown = true;
+                            }
                         }
                     }
                     std::this_thread::sleep_until(nextFrameAt);
@@ -6590,9 +7003,11 @@ void MediaPipeline::workerLoop()
                         fallbackMuxer->setNotice(std::nullopt);
                     }
                     if (streamIndicator.has_value()) {
-                        fallbackMuxer->setStreamInfo(streamIndicator);
+                        fallbackMuxer->setStreamInfo(notice.has_value() ? std::nullopt : streamIndicator);
                     } else if (active.has_value()) {
-                        fallbackMuxer->setStreamInfo(receivedStreamErrorText(*active, "waiting for valid video"));
+                        fallbackMuxer->setStreamInfo(notice.has_value()
+                                ? std::nullopt
+                                : std::optional<std::string>{receivedStreamErrorText(*active, "waiting for valid video")});
                     } else {
                         fallbackMuxer->setStreamInfo(std::nullopt);
                     }
@@ -6604,6 +7019,7 @@ void MediaPipeline::workerLoop()
                 if (liveFinished) {
                     retireLiveTranscoders();
                     liveAttemptStartedAt = {};
+                    liveAcquisitionWarningLogged = false;
                     fallbackMuxer->setStreamInfo(streamIndicator_);
                     fallbackFrameIndex = fallbackMuxer->nextVideoPts();
                     nextFrameAt = std::chrono::steady_clock::now();

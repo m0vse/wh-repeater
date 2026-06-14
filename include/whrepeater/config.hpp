@@ -100,19 +100,6 @@ struct HardwarePttConfig {
     bool activeHigh{true};
 };
 
-struct Sd1Config {
-    bool enabled{false};
-    ReceiverId receiver{5};
-    std::string deviceId{"sd1"};
-    std::string i2cDevice{"/dev/i2c-0"};
-    std::uint8_t i2cAddress{0x40};
-    std::string source{"auto"};
-    std::string captureDevice{"/dev/video0"};
-    std::uint32_t captureWidth{640};
-    std::uint32_t captureHeight{480};
-    std::uint32_t captureFrameRate{25};
-};
-
 struct AnalogueCaptureConfig {
     bool enabled{false};
     ReceiverId receiver{5};
@@ -133,7 +120,6 @@ struct AnalogueCaptureConfig {
 
 struct AnalogueConfig {
     AnalogueCaptureConfig capture;
-    Sd1Config sd1;
 };
 
 struct MediaConfig {

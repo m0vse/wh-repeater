@@ -143,6 +143,7 @@ constexpr std::array<std::array<std::uint32_t, 3>, 7> stv6120IcpLookup{{
 }};
 
 constexpr auto validTransportTimeout = std::chrono::milliseconds{1500};
+constexpr auto staleTransportLockGrace = std::chrono::milliseconds{7500};
 constexpr auto falseLockSuppressDuration = std::chrono::milliseconds{5000};
 
 constexpr std::array<std::uint16_t, 32> stv6120Cfhf{
@@ -973,7 +974,11 @@ private:
             return false;
         }
         if (now - watch.lastProgress > validTransportTimeout) {
+            if (now - watch.lastProgress <= validTransportTimeout + staleTransportLockGrace) {
+                return true;
+            }
             watch.suppressUntil = now + falseLockSuppressDuration;
+            watch.hasProgress = false;
             return false;
         }
         return true;

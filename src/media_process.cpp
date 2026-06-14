@@ -48,6 +48,8 @@ enum class MediaMessage : std::uint32_t {
     stopFallbackVideo = 6,
     tick = 7,
     transportStream = 8,
+    preview = 9,
+    streamInfo = 10,
 };
 
 struct MessageHeader {
@@ -261,6 +263,21 @@ std::string readStringPayload(std::span<const std::byte> payload)
     return reader.readString();
 }
 
+void sendChildMessage(int socket, MediaMessage type, std::span<const std::byte> payload)
+{
+    std::vector<std::byte> message;
+    message.reserve(sizeof(MessageHeader) + payload.size());
+    const MessageHeader header{static_cast<std::uint32_t>(type), static_cast<std::uint32_t>(payload.size())};
+    appendPod(message, header);
+    message.insert(message.end(), payload.begin(), payload.end());
+    (void)::send(socket, message.data(), message.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
+}
+
+void sendChildString(int socket, MediaMessage type, std::string_view value)
+{
+    sendChildMessage(socket, type, stringPayload(value));
+}
+
 void closeFd(int& fd)
 {
     if (fd >= 0) {
@@ -345,6 +362,14 @@ void runMediaChild(RepeaterConfig config, int socket)
         case MediaMessage::transportStream:
             media.write(payload);
             break;
+        case MediaMessage::preview:
+            media.setPreviewEnabled(readBoolPayload(payload));
+            break;
+        case MediaMessage::streamInfo:
+            break;
+        }
+        if (auto streamInfo = media.takeStreamInfoUpdate(); streamInfo.has_value()) {
+            sendChildString(socket, MediaMessage::streamInfo, *streamInfo);
         }
     }
 }
@@ -412,8 +437,21 @@ void MediaProcess::stopFallbackVideo()
     (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::stopFallbackVideo), {}, true);
 }
 
+void MediaProcess::setPreviewEnabled(bool enabled)
+{
+    previewEnabled_ = enabled;
+    auto payload = boolPayload(enabled);
+    if (lastPreviewPayload_.has_value() && *lastPreviewPayload_ == payload) {
+        return;
+    }
+    if (sendMessage(static_cast<std::uint32_t>(MediaMessage::preview), payload, true)) {
+        lastPreviewPayload_ = std::move(payload);
+    }
+}
+
 void MediaProcess::tick(std::chrono::steady_clock::time_point)
 {
+    drainChildMessages();
     if (fallbackVideoPath_.has_value()) {
         mode_ = MediaPipelineMode::fallbackVideo;
     } else if (active_.has_value()) {
@@ -425,6 +463,7 @@ void MediaProcess::tick(std::chrono::steady_clock::time_point)
     }
     flushTransportBuffer(false);
     (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::tick), {}, false);
+    drainChildMessages();
 }
 
 void MediaProcess::write(std::span<const std::byte> packet)
@@ -447,6 +486,11 @@ void MediaProcess::write(std::span<const std::byte> packet)
 MediaPipelineMode MediaProcess::mode() const
 {
     return mode_;
+}
+
+std::optional<std::string> MediaProcess::streamInfo() const
+{
+    return streamInfo_;
 }
 
 void MediaProcess::ensureRunning()
@@ -492,6 +536,7 @@ void MediaProcess::startChild()
     lastSelectPayload_.reset();
     lastBeaconPayload_.reset();
     lastNoticePayload_.reset();
+    lastPreviewPayload_.reset();
     std::cout << "media process started pid=" << childPid_ << '\n';
     replayState();
 }
@@ -593,6 +638,46 @@ bool MediaProcess::sendMessage(std::uint32_t type, std::span<const std::byte> pa
     return false;
 }
 
+void MediaProcess::drainChildMessages()
+{
+    if (socket_ < 0) {
+        return;
+    }
+
+    std::vector<std::byte> buffer(64 * 1024);
+    while (true) {
+        const auto received = ::recv(socket_, buffer.data(), buffer.size(), MSG_DONTWAIT);
+        if (received < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                return;
+            }
+            if (errno == EPIPE || errno == ECONNRESET || errno == ENOTCONN) {
+                std::cerr << "wh-repeater: media process socket closed while reading; restarting\n";
+                stopChild();
+                startChild();
+            }
+            return;
+        }
+        if (received == 0) {
+            return;
+        }
+        if (static_cast<std::size_t>(received) < sizeof(MessageHeader)) {
+            continue;
+        }
+
+        MessageHeader header{};
+        std::memcpy(&header, buffer.data(), sizeof(header));
+        const auto payloadSize = static_cast<std::size_t>(received) - sizeof(MessageHeader);
+        if (header.size != payloadSize) {
+            continue;
+        }
+        const std::span<const std::byte> payload{buffer.data() + sizeof(MessageHeader), payloadSize};
+        if (static_cast<MediaMessage>(header.type) == MediaMessage::streamInfo) {
+            streamInfo_ = readStringPayload(payload);
+        }
+    }
+}
+
 void MediaProcess::flushTransportBuffer(bool essential)
 {
     while (!transportBuffer_.empty()) {
@@ -624,6 +709,10 @@ void MediaProcess::replayState()
     }
     if (sendMessage(static_cast<std::uint32_t>(MediaMessage::notice), notice, true)) {
         lastNoticePayload_ = std::move(notice);
+    }
+    auto preview = boolPayload(previewEnabled_);
+    if (sendMessage(static_cast<std::uint32_t>(MediaMessage::preview), preview, true)) {
+        lastPreviewPayload_ = std::move(preview);
     }
     if (fallbackVideoPath_.has_value()) {
         (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::playFallbackVideo), stringPayload(*fallbackVideoPath_), true);

@@ -23,35 +23,77 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 option(WH_REPEATER_BUILD_GATEWAY_TOOLS "Build TS gateway validation tools" ON)
 
-add_executable(wh-repeater
+set(WH_REPEATER_COMMON_SOURCES
     src/main.cpp
     src/api_server.cpp
     src/config.cpp
     src/daemon.cpp
+    src/hardware_ptt.cpp
+    src/ident.cpp
+)
+
+set(WH_REPEATER_PI_GATEWAY_SOURCES
+    ${WH_REPEATER_COMMON_SOURCES}
+    src/i2c_bus_lock.cpp
+    src/nim_controller.cpp
+    src/scan_scheduler.cpp
+    src/signal_arbitrator.cpp
+    src/ts_gateway_sink.cpp
+    src/ts_router.cpp
+)
+
+set(WH_REPEATER_PC_GATEWAY_SOURCES
+    ${WH_REPEATER_COMMON_SOURCES}
     src/gateway_status_client.cpp
+    src/pc_gateway_input.cpp
+    src/pluto_sink.cpp
+    src/pluto_mqtt_status.cpp
+    src/gstreamer_backend.cpp
+    src/media_process.cpp
+    src/media_pipeline.cpp
+)
+
+set(WH_REPEATER_LEGACY_SOURCES
+    ${WH_REPEATER_COMMON_SOURCES}
+    src/gateway_status_client.cpp
+    src/i2c_bus_lock.cpp
     src/nim_controller.cpp
     src/pc_gateway_input.cpp
     src/scan_scheduler.cpp
     src/signal_arbitrator.cpp
-    src/ts_router.cpp
     src/ts_gateway_sink.cpp
+    src/ts_router.cpp
     src/pluto_sink.cpp
     src/pluto_mqtt_status.cpp
-    src/ident.cpp
-    src/hardware_ptt.cpp
-    src/i2c_bus_lock.cpp
     src/gstreamer_backend.cpp
     src/media_process.cpp
     src/media_pipeline.cpp
-    src/sd1_controller.cpp
 )
 
-target_include_directories(wh-repeater PRIVATE include)
-target_link_libraries(wh-repeater PRIVATE PkgConfig::FFMPEG)
-if(GSTREAMER_FOUND)
-    target_compile_definitions(wh-repeater PRIVATE WH_REPEATER_HAVE_GSTREAMER=1)
-    target_link_libraries(wh-repeater PRIVATE PkgConfig::GSTREAMER)
-endif()
+function(configure_wh_target target)
+    target_include_directories(${target} PRIVATE include)
+    target_link_libraries(${target} PRIVATE PkgConfig::FFMPEG)
+    if(GSTREAMER_FOUND)
+        target_compile_definitions(${target} PRIVATE WH_REPEATER_HAVE_GSTREAMER=1)
+        target_link_libraries(${target} PRIVATE PkgConfig::GSTREAMER)
+    endif()
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endfunction()
+
+add_executable(wh-pi-gateway ${WH_REPEATER_PI_GATEWAY_SOURCES})
+target_compile_definitions(wh-pi-gateway PRIVATE WH_REPEATER_PI_GATEWAY_ONLY=1)
+configure_wh_target(wh-pi-gateway)
+
+add_executable(wh-pc-gateway ${WH_REPEATER_PC_GATEWAY_SOURCES})
+target_compile_definitions(wh-pc-gateway PRIVATE WH_REPEATER_PC_GATEWAY_ONLY=1)
+configure_wh_target(wh-pc-gateway)
+
+add_executable(wh-repeater ${WH_REPEATER_LEGACY_SOURCES})
+configure_wh_target(wh-repeater)
 
 if(WH_REPEATER_BUILD_GATEWAY_TOOLS)
     add_executable(ts-gateway-inspect
@@ -59,14 +101,10 @@ if(WH_REPEATER_BUILD_GATEWAY_TOOLS)
     )
 endif()
 
-if(MSVC)
-    target_compile_options(wh-repeater PRIVATE /W4)
-    if(WH_REPEATER_BUILD_GATEWAY_TOOLS)
+if(WH_REPEATER_BUILD_GATEWAY_TOOLS)
+    if(MSVC)
         target_compile_options(ts-gateway-inspect PRIVATE /W4)
-    endif()
-else()
-    target_compile_options(wh-repeater PRIVATE -Wall -Wextra -Wpedantic)
-    if(WH_REPEATER_BUILD_GATEWAY_TOOLS)
+    else()
         target_compile_options(ts-gateway-inspect PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()

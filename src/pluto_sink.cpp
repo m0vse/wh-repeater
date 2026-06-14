@@ -41,6 +41,7 @@ constexpr std::size_t tsPacketSize{188};
 constexpr std::size_t packetsPerDatagram{7};
 constexpr std::size_t datagramSize{tsPacketSize * packetsPerDatagram};
 constexpr auto mqttTimeoutMs{250};
+constexpr std::uint16_t previewPort{15000};
 
 std::string mqttDeviceId(const PlutoConfig& config)
 {
@@ -208,18 +209,24 @@ PlutoSink::PlutoSink(PlutoConfig config)
     : config_{std::move(config)}
 {
     datagram_.reserve(datagramSize);
+    previewDatagram_.reserve(datagramSize);
 }
 
 PlutoSink::~PlutoSink()
 {
     flushDatagram();
+    flushPreviewDatagram();
     closeSocket(socket_);
+    closeSocket(previewSocket_);
 }
 
 PlutoSink::PlutoSink(PlutoSink&& other) noexcept
     : config_{std::move(other.config_)}
     , socket_{std::exchange(other.socket_, -1)}
+    , previewSocket_{std::exchange(other.previewSocket_, -1)}
     , datagram_{std::move(other.datagram_)}
+    , previewDatagram_{std::move(other.previewDatagram_)}
+    , previewEnabled_{other.previewEnabled_}
 {
 }
 
@@ -230,10 +237,15 @@ PlutoSink& PlutoSink::operator=(PlutoSink&& other) noexcept
     }
 
     flushDatagram();
+    flushPreviewDatagram();
     closeSocket(socket_);
+    closeSocket(previewSocket_);
     config_ = std::move(other.config_);
     socket_ = std::exchange(other.socket_, -1);
+    previewSocket_ = std::exchange(other.previewSocket_, -1);
     datagram_ = std::move(other.datagram_);
+    previewDatagram_ = std::move(other.previewDatagram_);
+    previewEnabled_ = other.previewEnabled_;
     return *this;
 }
 
@@ -253,12 +265,25 @@ void PlutoSink::writeMuxData(std::span<const std::byte> data)
     }
     configureTransmitter();
     openSocket();
+    writePreviewData(data);
     for (const auto byte : data) {
         datagram_.push_back(byte);
         if (datagram_.size() == datagramSize) {
             flushDatagram();
         }
     }
+}
+
+void PlutoSink::setPreviewEnabled(bool enabled)
+{
+    if (previewEnabled_ == enabled) {
+        return;
+    }
+    if (!enabled) {
+        flushPreviewDatagram();
+    }
+    previewEnabled_ = enabled;
+    std::cout << "wh-repeater: HDMI preview mirror " << (enabled ? "enabled" : "disabled") << '\n';
 }
 
 void PlutoSink::openSocket()
@@ -270,6 +295,18 @@ void PlutoSink::openSocket()
     socket_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (socket_ < 0) {
         throw std::runtime_error{"create Pluto UDP socket failed: " + std::string{std::strerror(errno)}};
+    }
+}
+
+void PlutoSink::openPreviewSocket()
+{
+    if (previewSocket_ >= 0) {
+        return;
+    }
+
+    previewSocket_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (previewSocket_ < 0) {
+        throw std::runtime_error{"create preview UDP socket failed: " + std::string{std::strerror(errno)}};
     }
 }
 
@@ -296,6 +333,47 @@ void PlutoSink::flushDatagram()
         std::cerr << "wh-repeater: Pluto UDP send failed: " << std::strerror(errno) << '\n';
     }
     datagram_.clear();
+}
+
+void PlutoSink::writePreviewData(std::span<const std::byte> data)
+{
+    if (!previewEnabled_ || data.empty()) {
+        return;
+    }
+    openPreviewSocket();
+    for (const auto byte : data) {
+        previewDatagram_.push_back(byte);
+        if (previewDatagram_.size() == datagramSize) {
+            flushPreviewDatagram();
+        }
+    }
+}
+
+void PlutoSink::flushPreviewDatagram()
+{
+    if (previewDatagram_.empty() || previewSocket_ < 0) {
+        previewDatagram_.clear();
+        return;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(previewPort);
+    if (::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) {
+        previewDatagram_.clear();
+        return;
+    }
+
+    const auto sent = ::sendto(previewSocket_,
+                              previewDatagram_.data(),
+                              previewDatagram_.size(),
+                              MSG_NOSIGNAL,
+                              reinterpret_cast<sockaddr*>(&addr),
+                              sizeof(addr));
+    if (sent < 0) {
+        std::cerr << "wh-repeater: preview UDP send failed: " << std::strerror(errno) << '\n';
+    }
+    previewDatagram_.clear();
 }
 
 void PlutoSink::setTransmitEnabled(bool enabled)

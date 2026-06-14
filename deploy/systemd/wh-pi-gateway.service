@@ -1,0 +1,19 @@
+[Unit]
+Description=WH Pi gateway daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=WH_REPEATER_NIM=serit
+WorkingDirectory=/var/lib/wh-pi-gateway
+ExecStart=/usr/local/bin/wh-pi-gateway /etc/wh-pi-gateway/config.json
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=15s
+KillMode=mixed
+FinalKillSignal=SIGKILL
+StateDirectory=wh-pi-gateway
+
+[Install]
+WantedBy=multi-user.target

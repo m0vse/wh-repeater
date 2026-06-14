@@ -88,8 +88,12 @@ In `pc-gateway` mode:
 
 ## HTTP API
 
-The Pi API binds to localhost by default and is normally exposed through nginx
-if remote access is required.
+In `ts-gateway` mode the Pi API binds to `0.0.0.0:8080` so the PC gateway can
+poll status and apply hardware configuration. This is a machine-to-machine API;
+do not serve the operator web UI or nginx from the Pi/Winterhill hardware.
+
+In `pc-gateway` and `local-transcode` modes the API binds to `127.0.0.1:8080`
+and is normally reached through the PC-side nginx/web UI.
 
 ### Health
 
@@ -224,6 +228,22 @@ gateway input as a single receiver. The PC-side poller uses short nonblocking
 network timeouts so an offline Pi does not stall media, fallback, Pluto, RTMP,
 or API handling.
 
+When the PC web UI saves configuration, `wh-pc-gateway` compares only the
+Pi-owned hardware gateway fields:
+
+- `statusIntervalMs`;
+- `selection.minimumMerDb`;
+- `selection.minimumDNumberDb`;
+- `tsGateway.address`;
+- `tsGateway.port`;
+- `receivers[]` scan plans, dwell times, hang times, and enabled states.
+
+If those fields changed and `piStatus.enabled` is true, the PC fetches the Pi
+config from `/api/config`, merges those fields into it, forces `mode` to
+`ts-gateway`, and sends the result back with `PUT /api/config`. Changes to PC
+media, Pluto, fallback, RTMP, preview, ident, or other output settings do not
+trigger a Pi config update.
+
 For the current GB3GV test PC, use:
 
 - PC address: `192.168.99.113`;
@@ -241,6 +261,57 @@ The Pi-side config should therefore include:
   }
 }
 ```
+
+## Target Mini-PC Network Layout
+
+The intended PC-side media processor is a fanless Intel Core Ultra 5 125U
+mini-PC with three 2.5GbE LAN interfaces. It has not arrived yet, so do not
+assume this hardware is available for current testing.
+
+Planned interface roles:
+
+- LAN 1: management, internet access, and BATC RTMP output;
+- LAN 2: dedicated point-to-point link to the Raspberry Pi CM4/Winterhill
+  receiver;
+- LAN 3: dedicated point-to-point link to the Pluto.
+
+Likely addressing:
+
+- mini-PC Pi-facing NIC: `10.10.20.1/24`;
+- Raspberry Pi: `10.10.20.2/24`;
+- mini-PC Pluto-facing NIC: `10.10.30.1/24`;
+- Pluto: `10.10.30.2/24`.
+
+Only the management/BATC interface should have a default route. The Pi-facing
+and Pluto-facing links should be directly connected subnets without default
+routes.
+
+The Pi remains the Winterhill/NIM control and raw TS gateway device. In the
+target layout, the Pi should forward selected MPEG-TS to the mini-PC over the
+dedicated Pi link:
+
+```json
+{
+  "mode": "ts-gateway",
+  "tsGateway": {
+    "address": "10.10.20.1",
+    "port": 5000
+  }
+}
+```
+
+The mini-PC should eventually own:
+
+- raw TS receive from the Pi;
+- decode/transcode and final H.264 encode;
+- fallback/status/slideshow video generation;
+- BATC RTMP output;
+- final MPEG-TS output to the Pluto over the Pluto-facing link;
+- logging, status, monitoring, and the operator web UI.
+
+Keep current development modular: continue improving Pi-side `ts-gateway` mode
+and the PC-side `pc-gateway` media/control boundary without baking in the
+temporary test-PC addresses or assuming the Core Ultra hardware is present.
 
 ## UDP MPEG-TS Contract
 
@@ -290,3 +361,141 @@ It reports:
 
 This tool is only an inspector. It does not replace the future PC server and it
 does not generate fallback output.
+
+## Next Development Stage After UDP Validation
+
+After the UDP MPEG-TS path is proven end to end, continue moving from the
+current mode-based binary toward two clearly demarcated services. The installed
+service and config split is now active; the deeper link-time/code split can
+follow once the runtime boundary is stable.
+
+### Pi Headless Gateway Service
+
+The Pi service should become a headless Winterhill hardware appliance.
+
+Responsibilities:
+
+- control the Winterhill NIM hardware;
+- scan configured RX1-RX4 frequency/symbol-rate plans;
+- select the active locked receiver;
+- expose a small hardware/status API on `0.0.0.0:8080`;
+- forward selected raw MPEG-TS to the PC over UDP;
+- continue scanning and reporting status when the PC/media path is unavailable.
+
+The Pi service should not own:
+
+- nginx;
+- the operator web UI;
+- decode/transcode/fallback/status-video generation;
+- RTMP/BATC output;
+- Pluto/media output;
+- broad operator-facing configuration.
+
+All operator commands should originate from the PC side. The Pi API should be
+treated as a machine-to-machine hardware API, not as a user interface.
+
+### PC Gateway And Control Service
+
+The PC service should become the control plane and media/output appliance.
+
+Responsibilities:
+
+- receive raw UDP MPEG-TS from the Pi;
+- poll/mirror Pi NIM status for the dashboard;
+- host the web UI through nginx;
+- own all operator-facing API routes;
+- decode/transcode/watermark/fallback/status generation;
+- own RTMP/BATC output;
+- own Pluto/modulator output;
+- own recording/diagnostics features;
+- send validated Pi hardware configuration updates to the Pi API.
+
+Browsers should talk only to the PC. The PC service should talk to the Pi API on
+behalf of the operator.
+
+### Service Split
+
+Installed service names:
+
+- `wh-pi-gateway`: Pi-only NIM scanner and UDP TS sender.
+- `wh-pc-gateway`: PC-side UDP receiver, media/output service, and control API.
+
+Config locations:
+
+- `/etc/wh-pi-gateway/config.json`;
+- `/etc/wh-pc-gateway/config.json`.
+
+Deployment commands:
+
+```sh
+sudo DEPLOY_TARGET=pi-gateway ./deploy/install.sh
+sudo DEPLOY_TARGET=pc-gateway ./deploy/install.sh
+```
+
+`DEPLOY_TARGET=pi-gateway` installs no web UI and no nginx site. The Pi remains
+headless apart from SSH and the port-8080 hardware API used by the PC service.
+
+The current single binary can be kept while validating the architecture, but the
+post-validation split should remove runtime mode branching where practical:
+
+- the Pi executable should not link or require FFmpeg/GStreamer/media output
+  components;
+- the PC executable should not link or require whdriver/NIM/I2C hardware
+  components.
+
+Shared code can remain in common libraries for types, config parsing, API
+helpers, and JSON utilities.
+
+### PC-Managed Pi Configuration
+
+The PC web UI should include a Pi Gateway configuration section. Those controls
+should update the Pi through the PC backend, not directly from browser
+JavaScript.
+
+PC API routes can be added as a stable facade:
+
+```text
+GET /api/pi/status
+GET /api/pi/config
+PUT /api/pi/config
+```
+
+The PC backend should proxy these to:
+
+```text
+GET http://<piStatus.address>:8080/api/status
+GET http://<piStatus.address>:8080/api/config
+PUT http://<piStatus.address>:8080/api/config
+```
+
+Only Pi-owned fields should be accepted and forwarded:
+
+- `mode`, fixed to `ts-gateway`;
+- `statusIntervalMs`;
+- `selection.minimumMerDb`;
+- `selection.minimumDNumberDb`;
+- `tsGateway.address`;
+- `tsGateway.port`;
+- `receivers[]`:
+  - enabled state;
+  - dwell time;
+  - hang time;
+  - scan targets;
+  - frequency;
+  - symbol rate;
+  - local oscillator;
+  - DVB system;
+  - FEC;
+  - label.
+
+The Pi should reject media/output fields in gateway mode, including:
+
+- `pluto`;
+- `streaming`;
+- `media`;
+- `fallback`;
+- `analogue` media capture;
+- RTMP/BATC/recording/output controls.
+
+This keeps the PC as the single operator console while preserving a narrow,
+testable Pi hardware boundary.

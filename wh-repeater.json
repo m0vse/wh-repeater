@@ -103,18 +103,6 @@
       "gpioChip": "/dev/gpiochip0",
       "gpioLine": 26,
       "gpioActiveHigh": true
-    },
-    "sd1": {
-      "enabled": false,
-      "receiverId": 5,
-      "deviceId": "sd1",
-      "i2cDevice": "/dev/i2c-0",
-      "i2cAddress": 64,
-      "source": "auto",
-      "captureDevice": "/dev/video0",
-      "captureWidth": 640,
-      "captureHeight": 480,
-      "captureFrameRate": 25
     }
   },
   "receivers": [

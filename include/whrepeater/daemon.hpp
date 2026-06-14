@@ -6,8 +6,8 @@
  *
  *  Purpose:
  *    Declares the top-level daemon object that wires scanning, arbitration,
- *    hardware control, media generation, Pluto output, SD1 status, and the
- *    API server together.
+ *    hardware control, media generation, Pluto output, and the API server
+ *    together.
  *
  *  Project notes:
  *    wh-repeater is a fresh C++ daemon for a Winterhill-derived DVB repeater.
@@ -31,8 +31,12 @@ public:
     int run();
 
 private:
+#if !defined(WH_REPEATER_PC_GATEWAY_ONLY)
     int runPiGatewayOrLocal();
+#endif
+#if !defined(WH_REPEATER_PI_GATEWAY_ONLY)
     int runPcGateway();
+#endif
 
     RepeaterConfig config_;
     std::filesystem::path configPath_;
