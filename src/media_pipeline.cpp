@@ -4688,6 +4688,13 @@ private:
             : std::optional<std::string>{std::string{"SD analogue\n"} + videoSize + " " + captureFrameRate + " fps"};
         output_.setStreamInfo(std::move(streamInfo));
         output_.beginSubmittedSource("analogue", capture.audioEnabled);
+        struct SubmittedSourceGuard {
+            EncodedOutputSink& output;
+            ~SubmittedSourceGuard()
+            {
+                output.endSubmittedSource("analogue");
+            }
+        } submittedSourceGuard{output_};
 
         std::cout << "media pipeline capturing analogue from " << capture.captureDevice
                   << " as " << capture.captureStandard << " " << capture.captureInputFormat << " "
@@ -4741,9 +4748,10 @@ private:
             av_packet_unref(packet.get());
         }
 
-        checkAv(avcodec_send_packet(decoderContext.get(), nullptr), "flush analogue decoder");
-        drainDecoder(decoderContext.get(), frame.get(), convertedFrame.get(), scaler, output_, captureStartedAt, lastFramePts);
-        output_.endSubmittedSource("analogue");
+        if (!stopping_.load()) {
+            checkAv(avcodec_send_packet(decoderContext.get(), nullptr), "flush analogue decoder");
+            drainDecoder(decoderContext.get(), frame.get(), convertedFrame.get(), scaler, output_, captureStartedAt, lastFramePts);
+        }
     }
 
     void audioCaptureLoop()
@@ -4891,6 +4899,9 @@ private:
         if (audioCodec == nullptr) {
             return;
         }
+        if (!videoStarted_.load(std::memory_order_acquire)) {
+            return;
+        }
         if (!resampler) {
             AVChannelLayout inputLayout{};
             if (frame->ch_layout.nb_channels > 0) {
@@ -5034,6 +5045,9 @@ private:
             }
             lastFramePts = pts;
             outputMuxer.submitVideoFrame(convertFrame(frame, convertedFrame, scaler, outputMuxer, pts), "analogue");
+            if (!videoStarted_.exchange(true, std::memory_order_acq_rel)) {
+                std::cout << "media pipeline analogue audio sync started from first video frame\n";
+            }
             av_frame_unref(frame);
         }
     }
@@ -5104,6 +5118,7 @@ private:
     RepeaterConfig config_;
     EncodedOutputSink& output_;
     std::optional<ActiveInput> active_;
+    std::atomic_bool videoStarted_{false};
     std::atomic_bool stopping_{false};
     std::atomic_bool finished_{false};
     std::thread thread_;
@@ -5875,6 +5890,7 @@ public:
         noticeMorsePlayedForNotice_ = false;
         noticeMorsePending_ = notice_.has_value() && endTone && !noticeMorseUnits_.empty();
         pendingSlateRender_.reset();
+        noticeUsingBuiltInSlate_ = false;
         if (!notice_.has_value()) {
             noticeMorseActive_ = false;
             noticeMorseStartSample_ = std::numeric_limits<std::int64_t>::max();
@@ -6185,12 +6201,16 @@ private:
         }
 
         if (notice_.has_value()) {
-            pollSlateRenderLocked(*notice_);
-            if (!pendingSlateRender_) {
+            if (!noticeUsingBuiltInSlate_) {
+                pollSlateRenderLocked(*notice_);
+            }
+            if (!noticeUsingBuiltInSlate_ && !pendingSlateRender_) {
                 startSlateRenderLocked(*notice_);
             }
             if (!cachedSlate_) {
                 cachedSlate_ = renderSlateFrame(config_, *notice_, frameRate_);
+                noticeUsingBuiltInSlate_ = true;
+                pendingSlateRender_.reset();
                 cachedComposited_.reset();
             }
             contentIdentity = cachedSlate_.get();
@@ -6982,6 +7002,7 @@ private:
     std::optional<std::string> notice_;
     FramePtr cachedSlate_;
     std::shared_ptr<AsyncRenderedFrame> pendingSlateRender_;
+    bool noticeUsingBuiltInSlate_{false};
     FramePtr cachedIdent_;
     FramePtr cachedTestcard_;
     std::shared_ptr<AsyncRenderedFrame> pendingTestcardRender_;

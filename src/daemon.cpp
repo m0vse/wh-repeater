@@ -1225,6 +1225,11 @@ int Daemon::runPcGateway()
     std::optional<std::string> pcSessionVideoFormat;
     std::chrono::steady_clock::time_point pcSessionStartedAt{};
     bool pcWasActive{};
+    std::optional<ActiveInput> analogueSessionInput;
+    std::optional<std::string> analogueSessionServiceName;
+    std::optional<std::string> analogueSessionVideoFormat;
+    std::chrono::steady_clock::time_point analogueSessionStartedAt{};
+    bool analogueWasActive{};
     bool previewRequestedByApi{};
     std::chrono::steady_clock::time_point accessNoticeUntil{};
     std::chrono::steady_clock::time_point lastGatewayStatusWarning{};
@@ -1407,6 +1412,39 @@ int Daemon::runPcGateway()
                 mediaActive = analogueActive;
                 accessNotice = accessMessage(config_, *analogueActive);
                 accessNoticeEndTone = false;
+                if (!analogueWasActive) {
+                    analogueSessionStartedAt = now;
+                    analogueSessionInput = analogueActive;
+                    analogueSessionServiceName.reset();
+                    analogueSessionVideoFormat.reset();
+                }
+                analogueSessionInput = analogueActive;
+                if (analogueActive->status.serviceName.has_value() && !analogueActive->status.serviceName->empty()) {
+                    analogueSessionServiceName = analogueActive->status.serviceName;
+                }
+                if (latestMediaStreamInfo.has_value()) {
+                    if (auto service = serviceFromStreamInfo(*latestMediaStreamInfo); service.has_value()) {
+                        analogueSessionServiceName = std::move(service);
+                    }
+                    if (auto video = videoFormatFromStreamInfo(*latestMediaStreamInfo); video.has_value()) {
+                        analogueSessionVideoFormat = std::move(video);
+                    }
+                }
+                analogueWasActive = true;
+            } else if (analogueWasActive && analogueSessionInput.has_value()) {
+                accessNotice = accessMessage(config_,
+                                             *analogueSessionInput,
+                                             {},
+                                             true,
+                                             now - analogueSessionStartedAt,
+                                             analogueSessionServiceName,
+                                             analogueSessionVideoFormat);
+                accessNoticeEndTone = true;
+                accessNoticeUntil = now + kPcAccessNoticeHold;
+                analogueWasActive = false;
+                analogueSessionInput.reset();
+                analogueSessionServiceName.reset();
+                analogueSessionVideoFormat.reset();
             } else if (accessNotice.has_value() && now >= accessNoticeUntil) {
                 accessNotice.reset();
                 accessNoticeEndTone = false;
