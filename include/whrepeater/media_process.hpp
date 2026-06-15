@@ -40,7 +40,7 @@ public:
 
     void select(std::optional<ActiveInput> input);
     void setBeaconAllowed(bool allowed);
-    void setAccessNotice(std::optional<std::string> notice);
+    void setAccessNotice(std::optional<std::string> notice, bool endTone = false);
     void playFallbackVideo(std::string path);
     void stopFallbackVideo();
     void seekFallbackVideo(std::chrono::milliseconds position);
@@ -67,6 +67,7 @@ private:
     bool beaconAllowed_{true};
     bool previewEnabled_{false};
     std::optional<std::string> accessNotice_;
+    bool accessNoticeEndTone_{false};
     std::optional<std::string> fallbackVideoPath_;
     std::optional<std::chrono::milliseconds> fallbackVideoSeek_;
     MediaPipelineMode mode_{MediaPipelineMode::idle};
@@ -76,6 +77,7 @@ private:
     std::optional<std::vector<std::byte>> lastSelectPayload_;
     std::optional<std::vector<std::byte>> lastBeaconPayload_;
     std::optional<std::vector<std::byte>> lastNoticePayload_;
+    std::optional<std::vector<std::byte>> lastNoticeEndTonePayload_;
     std::optional<std::vector<std::byte>> lastPreviewPayload_;
     std::optional<std::string> streamInfo_;
     std::optional<std::string> fallbackVideoStatus_;

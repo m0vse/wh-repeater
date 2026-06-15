@@ -51,7 +51,8 @@ public:
 
     void select(std::optional<ActiveInput> input);
     void setBeaconAllowed(bool allowed);
-    void setAccessNotice(std::optional<std::string> notice);
+    void setAccessNotice(std::optional<std::string> notice, bool endTone = false);
+    void setAccessNoticeEndTone(bool endTone);
     void playFallbackVideo(std::string path);
     void stopFallbackVideo();
     void seekFallbackVideo(std::chrono::milliseconds position);
@@ -87,6 +88,7 @@ private:
     bool beaconAllowed_{true};
     bool transmitEnabled_{false};
     std::optional<std::string> accessNotice_;
+    bool accessNoticeEndTone_{false};
     std::optional<std::string> streamIndicator_;
     std::optional<std::string> sessionStreamInfo_;
     std::optional<std::string> pendingSessionStreamInfo_;

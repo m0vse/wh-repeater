@@ -52,6 +52,7 @@ enum class MediaMessage : std::uint32_t {
     streamInfo = 10,
     seekFallbackVideo = 11,
     fallbackVideoStatus = 12,
+    noticeEndTone = 13,
 };
 
 struct MessageHeader {
@@ -365,6 +366,9 @@ void runMediaChild(RepeaterConfig config, int socket)
                 media.setAccessNotice(readStringPayload(payload));
             }
             break;
+        case MediaMessage::noticeEndTone:
+            media.setAccessNoticeEndTone(readBoolPayload(payload));
+            break;
         case MediaMessage::playFallbackVideo:
             media.playFallbackVideo(readStringPayload(payload));
             break;
@@ -433,15 +437,21 @@ void MediaProcess::setBeaconAllowed(bool allowed)
     }
 }
 
-void MediaProcess::setAccessNotice(std::optional<std::string> notice)
+void MediaProcess::setAccessNotice(std::optional<std::string> notice, bool endTone)
 {
     accessNotice_ = std::move(notice);
+    accessNoticeEndTone_ = accessNotice_.has_value() && endTone;
     auto payload = accessNotice_.has_value() ? stringPayload(*accessNotice_) : std::vector<std::byte>{};
-    if (lastNoticePayload_.has_value() && *lastNoticePayload_ == payload) {
-        return;
+    if (!lastNoticePayload_.has_value() || *lastNoticePayload_ != payload) {
+        if (sendMessage(static_cast<std::uint32_t>(MediaMessage::notice), payload, true)) {
+            lastNoticePayload_ = std::move(payload);
+        }
     }
-    if (sendMessage(static_cast<std::uint32_t>(MediaMessage::notice), payload, true)) {
-        lastNoticePayload_ = std::move(payload);
+    auto tonePayload = boolPayload(accessNoticeEndTone_);
+    if (!lastNoticeEndTonePayload_.has_value() || *lastNoticeEndTonePayload_ != tonePayload) {
+        if (sendMessage(static_cast<std::uint32_t>(MediaMessage::noticeEndTone), tonePayload, true)) {
+            lastNoticeEndTonePayload_ = std::move(tonePayload);
+        }
     }
 }
 
@@ -750,6 +760,10 @@ void MediaProcess::replayState()
     }
     if (sendMessage(static_cast<std::uint32_t>(MediaMessage::notice), notice, true)) {
         lastNoticePayload_ = std::move(notice);
+    }
+    auto noticeEndTone = boolPayload(accessNoticeEndTone_);
+    if (sendMessage(static_cast<std::uint32_t>(MediaMessage::noticeEndTone), noticeEndTone, true)) {
+        lastNoticeEndTonePayload_ = std::move(noticeEndTone);
     }
     auto preview = boolPayload(previewEnabled_);
     if (sendMessage(static_cast<std::uint32_t>(MediaMessage::preview), preview, true)) {

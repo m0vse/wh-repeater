@@ -29,6 +29,7 @@ const el = {
   saveState: document.querySelector("#save-state"),
   statusGrid: document.querySelector("#status-grid"),
   txStatusPanel: document.querySelector("#tx-status-panel"),
+  systemStatusPanel: document.querySelector("#system-status-panel"),
   receivers: document.querySelector("#receivers"),
   refresh: document.querySelector("#refresh"),
   save: document.querySelector("#save"),
@@ -159,6 +160,41 @@ function formatValue(value, suffix = "") {
   return value === null || value === undefined ? "-" : `${value}${suffix}`;
 }
 
+function formatPercent(value) {
+  return Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)}%` : "-";
+}
+
+function formatBytesFromKb(value) {
+  const kb = Number(value);
+  if (!Number.isFinite(kb)) {
+    return "-";
+  }
+  const mib = kb / 1024;
+  if (mib < 1024) {
+    return `${mib.toFixed(0)} MiB`;
+  }
+  return `${(mib / 1024).toFixed(1)} GiB`;
+}
+
+function formatUptime(seconds) {
+  let total = Math.max(0, Math.floor(Number(seconds)));
+  if (!Number.isFinite(total)) {
+    return "-";
+  }
+  const days = Math.floor(total / 86400);
+  total %= 86400;
+  const hours = Math.floor(total / 3600);
+  total %= 3600;
+  const minutes = Math.floor(total / 60);
+  if (days > 0) {
+    return `${days}d ${hours}h`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  return `${minutes}m`;
+}
+
 function fixedReceiverAntenna(receiverId) {
   return receiverId === 1 || receiverId === 3 ? "top" : "bottom";
 }
@@ -271,6 +307,7 @@ function renderStatus() {
     el.statusGrid.innerHTML = `<section class="panel">No receiver status yet.</section>`;
   }
   renderTxStatus();
+  renderSystemStatus();
 }
 
 function appendStatusRow(list, label, value) {
@@ -388,6 +425,66 @@ function renderTxStatus() {
   appendStatusRow(list, "Updated", pluto ? `${pluto.updatedMsAgo ?? 0} ms ago` : null);
   appendStatusRow(list, "Error", pluto?.error);
   el.txStatusPanel.appendChild(list);
+}
+
+function renderSystemStatus() {
+  if (!el.systemStatusPanel) {
+    return;
+  }
+  const system = state.status?.systemStats || {};
+  const entries = [];
+  if (system.pc) {
+    entries.push(["PC", system.pc]);
+  }
+  if (system.pi) {
+    entries.push(["Pi", system.pi]);
+  }
+  if (system.local && entries.length === 0) {
+    entries.push(["Local", system.local]);
+  }
+
+  el.systemStatusPanel.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "panel-head";
+  const title = document.createElement("h2");
+  title.textContent = "System Status";
+  head.appendChild(title);
+  el.systemStatusPanel.appendChild(head);
+
+  if (entries.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No system statistics available.";
+    el.systemStatusPanel.appendChild(empty);
+    return;
+  }
+
+  const list = document.createElement("div");
+  list.className = "system-status-grid";
+  for (const [label, stats] of entries) {
+    const memory = `${formatBytesFromKb(stats.memoryUsedKb)} / ${formatBytesFromKb(stats.memoryTotalKb)}`;
+    const process = stats.process || {};
+    const temperature = Number.isFinite(Number(stats.temperatureC)) ? `${Number(stats.temperatureC).toFixed(1)} C` : "-";
+    const row = document.createElement("section");
+    row.className = "system-status-card";
+    row.innerHTML = `
+      <h3>${label}</h3>
+      <dl>
+        <dt>Host</dt><dd>${stats.hostname || "-"}</dd>
+        <dt>CPU</dt><dd>${formatPercent(stats.cpuPercent)}</dd>
+        <dt>Load</dt><dd>${Number.isFinite(Number(stats.load1)) ? Number(stats.load1).toFixed(2) : "-"}</dd>
+        <dt>RAM</dt><dd>${memory} (${formatPercent(stats.memoryUsedPercent)})</dd>
+        <dt>Swap</dt><dd>${formatBytesFromKb(stats.swapUsedKb)} / ${formatBytesFromKb(stats.swapTotalKb)}</dd>
+        <dt>Service CPU</dt><dd>${formatPercent(process.cpuPercent)}</dd>
+        <dt>Service RAM</dt><dd>${formatBytesFromKb(process.memoryKb)}</dd>
+        <dt>Service tasks</dt><dd>${process.tasks ?? "-"}</dd>
+        <dt>Temp</dt><dd>${temperature}</dd>
+        <dt>Uptime</dt><dd>${formatUptime(stats.uptimeSeconds)}</dd>
+      </dl>
+    `;
+    list.appendChild(row);
+  }
+  el.systemStatusPanel.appendChild(list);
 }
 
 function fillConfigForm() {

@@ -220,6 +220,44 @@ main {
   overflow-wrap: anywhere;
 }
 
+.system-status-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.system-status-card {
+  border: 1px solid #e4e8ee;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.system-status-card h3 {
+  font-size: 15px;
+  margin-bottom: 10px;
+}
+
+.system-status-card dl {
+  display: grid;
+  gap: 7px 12px;
+  grid-template-columns: auto minmax(0, 1fr);
+  margin: 0;
+}
+
+.system-status-card dt {
+  color: #647080;
+}
+
+.system-status-card dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.muted {
+  color: #647080;
+}
+
 .status-card dt {
   color: #647080;
 }
@@ -382,6 +420,10 @@ input[type="checkbox"] {
 
   .tx-status-grid {
     grid-template-columns: repeat(2, auto minmax(0, 1fr));
+  }
+
+  .system-status-grid {
+    grid-template-columns: 1fr;
   }
 }
 

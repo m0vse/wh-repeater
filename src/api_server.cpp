@@ -28,8 +28,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <netinet/in.h>
 #include <sstream>
 #include <stdexcept>
@@ -144,6 +146,281 @@ std::string optionalDoubleJson(const std::optional<double>& value)
     std::ostringstream out;
     out << *value;
     return out.str();
+}
+
+struct CpuSample {
+    std::uint64_t idle{};
+    std::uint64_t total{};
+};
+
+struct CpuTracker {
+    std::optional<CpuSample> previous;
+};
+
+struct ProcessTracker {
+    std::optional<std::uint64_t> previousUsageUsec;
+    std::optional<double> previousUptimeSeconds;
+};
+
+std::optional<std::uint64_t> meminfoKb(std::string_view key)
+{
+    std::ifstream input{"/proc/meminfo"};
+    std::string name;
+    std::uint64_t value{};
+    std::string unit;
+    while (input >> name >> value >> unit) {
+        if (!name.empty() && name.back() == ':') {
+            name.pop_back();
+        }
+        if (name == key) {
+            return value;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<CpuSample> readCpuSample()
+{
+    std::ifstream input{"/proc/stat"};
+    std::string label;
+    std::uint64_t user{};
+    std::uint64_t nice{};
+    std::uint64_t system{};
+    std::uint64_t idle{};
+    std::uint64_t iowait{};
+    std::uint64_t irq{};
+    std::uint64_t softirq{};
+    std::uint64_t steal{};
+    if (!(input >> label >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal) || label != "cpu") {
+        return std::nullopt;
+    }
+    const auto idleAll = idle + iowait;
+    const auto total = user + nice + system + idle + iowait + irq + softirq + steal;
+    return CpuSample{.idle = idleAll, .total = total};
+}
+
+std::optional<double> cpuUsagePercent(CpuTracker& tracker)
+{
+    const auto current = readCpuSample();
+    if (!current.has_value()) {
+        return std::nullopt;
+    }
+    if (!tracker.previous.has_value()) {
+        tracker.previous = current;
+        return std::nullopt;
+    }
+    const auto previous = *tracker.previous;
+    tracker.previous = current;
+    if (current->total <= previous.total || current->idle < previous.idle) {
+        return std::nullopt;
+    }
+    const auto totalDelta = current->total - previous.total;
+    const auto idleDelta = current->idle - previous.idle;
+    if (totalDelta == 0 || idleDelta > totalDelta) {
+        return std::nullopt;
+    }
+    return 100.0 * static_cast<double>(totalDelta - idleDelta) / static_cast<double>(totalDelta);
+}
+
+std::optional<double> loadAverage1m()
+{
+    std::ifstream input{"/proc/loadavg"};
+    double value{};
+    if (input >> value) {
+        return value;
+    }
+    return std::nullopt;
+}
+
+std::optional<double> uptimeSeconds()
+{
+    std::ifstream input{"/proc/uptime"};
+    double value{};
+    if (input >> value) {
+        return value;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::filesystem::path> selfCgroupPath()
+{
+    std::ifstream input{"/proc/self/cgroup"};
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto secondColon = line.find(':', line.find(':') == std::string::npos ? std::string::npos : line.find(':') + 1);
+        if (secondColon == std::string::npos) {
+            continue;
+        }
+        auto relative = line.substr(secondColon + 1);
+        if (!relative.empty() && relative.front() == '/') {
+            relative.erase(relative.begin());
+        }
+        return std::filesystem::path{"/sys/fs/cgroup"} / relative;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::uint64_t> readUintFile(const std::filesystem::path& path)
+{
+    std::ifstream input{path};
+    std::uint64_t value{};
+    if (input >> value) {
+        return value;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::uint64_t> cgroupStatValue(const std::filesystem::path& path, std::string_view key)
+{
+    std::ifstream input{path};
+    std::string name;
+    std::uint64_t value{};
+    while (input >> name >> value) {
+        if (name == key) {
+            return value;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::uint64_t> procSelfStatusValue(std::string_view key)
+{
+    std::ifstream input{"/proc/self/status"};
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream fields{line};
+        std::string name;
+        std::uint64_t value{};
+        if (!(fields >> name >> value)) {
+            continue;
+        }
+        if (!name.empty() && name.back() == ':') {
+            name.pop_back();
+        }
+        if (name == key) {
+            return value;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string processStatsJson(ProcessTracker& tracker)
+{
+    const auto cgroup = selfCgroupPath();
+    std::optional<std::uint64_t> memoryKb;
+    std::optional<std::uint64_t> tasks;
+    std::optional<std::uint64_t> usageUsec;
+    if (cgroup.has_value()) {
+        if (const auto memoryBytes = readUintFile(*cgroup / "memory.current"); memoryBytes.has_value()) {
+            memoryKb = *memoryBytes / 1024;
+        }
+        tasks = readUintFile(*cgroup / "pids.current");
+        usageUsec = cgroupStatValue(*cgroup / "cpu.stat", "usage_usec");
+    }
+    if (!memoryKb.has_value()) {
+        memoryKb = procSelfStatusValue("VmRSS");
+    }
+    if (!tasks.has_value()) {
+        tasks = procSelfStatusValue("Threads");
+    }
+
+    std::optional<double> cpuPercent;
+    const auto now = uptimeSeconds();
+    if (usageUsec.has_value() && now.has_value()) {
+        if (tracker.previousUsageUsec.has_value()
+            && tracker.previousUptimeSeconds.has_value()
+            && *usageUsec >= *tracker.previousUsageUsec
+            && *now > *tracker.previousUptimeSeconds) {
+            const auto usedSeconds = static_cast<double>(*usageUsec - *tracker.previousUsageUsec) / 1'000'000.0;
+            const auto elapsedSeconds = *now - *tracker.previousUptimeSeconds;
+            cpuPercent = 100.0 * usedSeconds / elapsedSeconds;
+        }
+        tracker.previousUsageUsec = usageUsec;
+        tracker.previousUptimeSeconds = now;
+    }
+
+    std::ostringstream out;
+    out << "{"
+        << "\"cpuPercent\":" << optionalDoubleJson(cpuPercent) << ","
+        << "\"cpuSeconds\":" << (usageUsec.has_value() ? std::to_string(static_cast<double>(*usageUsec) / 1'000'000.0) : "null") << ","
+        << "\"memoryKb\":" << (memoryKb.has_value() ? std::to_string(*memoryKb) : "null") << ","
+        << "\"tasks\":" << (tasks.has_value() ? std::to_string(*tasks) : "null")
+        << "}";
+    return out.str();
+}
+
+std::optional<double> firstThermalTemperatureC()
+{
+    std::error_code ec;
+    const std::filesystem::path thermalRoot{"/sys/class/thermal"};
+    if (!std::filesystem::is_directory(thermalRoot, ec)) {
+        return std::nullopt;
+    }
+    for (std::filesystem::directory_iterator it{thermalRoot, ec}, end; !ec && it != end; it.increment(ec)) {
+        const auto tempPath = it->path() / "temp";
+        std::ifstream input{tempPath};
+        double milliC{};
+        if (input >> milliC && milliC > -100000.0 && milliC < 200000.0) {
+            return milliC / 1000.0;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string hostname()
+{
+    std::array<char, 256> buffer{};
+    if (::gethostname(buffer.data(), buffer.size() - 1) == 0) {
+        return buffer.data();
+    }
+    return {};
+}
+
+std::string localSystemStatsJson(std::string_view role, CpuTracker& cpuTracker, ProcessTracker& processTracker)
+{
+    const auto memTotal = meminfoKb("MemTotal");
+    const auto memAvailable = meminfoKb("MemAvailable");
+    const auto swapTotal = meminfoKb("SwapTotal");
+    const auto swapFree = meminfoKb("SwapFree");
+    const auto usedKb = memTotal.has_value() && memAvailable.has_value() && *memTotal >= *memAvailable
+        ? std::optional<std::uint64_t>{*memTotal - *memAvailable}
+        : std::nullopt;
+    const auto swapUsedKb = swapTotal.has_value() && swapFree.has_value() && *swapTotal >= *swapFree
+        ? std::optional<std::uint64_t>{*swapTotal - *swapFree}
+        : std::nullopt;
+    const auto memPercent = memTotal.has_value() && usedKb.has_value() && *memTotal > 0
+        ? std::optional<double>{100.0 * static_cast<double>(*usedKb) / static_cast<double>(*memTotal)}
+        : std::nullopt;
+
+    std::ostringstream out;
+    out << "{"
+        << "\"role\":" << jsonString(role) << ","
+        << "\"hostname\":" << jsonString(hostname()) << ","
+        << "\"cpuPercent\":" << optionalDoubleJson(cpuUsagePercent(cpuTracker)) << ","
+        << "\"load1\":" << optionalDoubleJson(loadAverage1m()) << ","
+        << "\"memoryTotalKb\":" << (memTotal.has_value() ? std::to_string(*memTotal) : "null") << ","
+        << "\"memoryUsedKb\":" << (usedKb.has_value() ? std::to_string(*usedKb) : "null") << ","
+        << "\"memoryAvailableKb\":" << (memAvailable.has_value() ? std::to_string(*memAvailable) : "null") << ","
+        << "\"memoryUsedPercent\":" << optionalDoubleJson(memPercent) << ","
+        << "\"swapTotalKb\":" << (swapTotal.has_value() ? std::to_string(*swapTotal) : "null") << ","
+        << "\"swapUsedKb\":" << (swapUsedKb.has_value() ? std::to_string(*swapUsedKb) : "null") << ","
+        << "\"process\":" << processStatsJson(processTracker) << ","
+        << "\"temperatureC\":" << optionalDoubleJson(firstThermalTemperatureC()) << ","
+        << "\"uptimeSeconds\":" << optionalDoubleJson(uptimeSeconds())
+        << "}";
+    return out.str();
+}
+
+CpuTracker& apiCpuTracker()
+{
+    static CpuTracker tracker;
+    return tracker;
+}
+
+ProcessTracker& apiProcessTracker()
+{
+    static ProcessTracker tracker;
+    return tracker;
 }
 
 std::string optionalTargetJson(const std::optional<ScanTarget>& target)
@@ -952,6 +1229,17 @@ void ApiServer::handleClient(int clientFd)
         return;
     }
 
+    if (method == "GET" && path == "/api/system") {
+        RepeaterConfig config;
+        {
+            std::lock_guard lock{snapshotMutex_};
+            config = repeaterConfig_;
+        }
+        const auto body = localSystemStatsJson(config.mode, apiCpuTracker(), apiProcessTracker()) + "\n";
+        writeResponse(clientFd, "200 OK", "application/json", body);
+        return;
+    }
+
     if (method == "GET" && path == "/api/config") {
         const auto body = configJson();
         writeResponse(clientFd, "200 OK", "application/json", body);
@@ -1266,6 +1554,16 @@ std::string ApiServer::statusJson() const
     const auto remoteTransitions = config.mode == "pc-gateway" && !remoteStatus.empty()
         ? jsonMember(remoteStatus, "receiverTransitions")
         : std::optional<std::string_view>{};
+    const auto remoteSystem = config.mode == "pc-gateway" && !remoteStatus.empty()
+        ? jsonMember(remoteStatus, "systemStats")
+        : std::optional<std::string_view>{};
+    const auto remoteSystemLocal = remoteSystem.has_value()
+        ? jsonMember(*remoteSystem, "local")
+        : std::optional<std::string_view>{};
+    const auto remoteSystemPi = remoteSystem.has_value()
+        ? jsonMember(*remoteSystem, "pi")
+        : std::optional<std::string_view>{};
+    const auto localSystem = localSystemStatsJson(config.mode, apiCpuTracker(), apiProcessTracker());
     const auto localAnalogueActive = active.has_value()
         && active->receiver == config.analogue.capture.receiver;
     const auto analogueVisible = analogue.has_value() && analogue->enabled;
@@ -1477,6 +1775,24 @@ std::string ApiServer::statusJson() const
         << "\"active\":" << (previewActive ? "true" : "false")
         << "}";
     out << ",\"fallbackVideo\":" << (fallbackVideoStatus.has_value() ? *fallbackVideoStatus : "null");
+    out << ",\"systemStats\":{";
+    if (config.mode == "pc-gateway") {
+        out << "\"pc\":" << localSystem << ",\"pi\":";
+        if (remoteSystemPi.has_value()) {
+            out << *remoteSystemPi;
+        } else if (remoteSystemLocal.has_value()) {
+            out << *remoteSystemLocal;
+        } else if (remoteSystem.has_value()) {
+            out << *remoteSystem;
+        } else {
+            out << "null";
+        }
+    } else if (config.mode == "ts-gateway") {
+        out << "\"pc\":null,\"pi\":" << localSystem;
+    } else {
+        out << "\"local\":" << localSystem;
+    }
+    out << "}";
     out << ",\"pluto\":";
     if (pluto.has_value()) {
         out << "{"

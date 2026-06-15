@@ -5279,6 +5279,7 @@ public:
         , frameRate_{outputFrameRate(config_)}
         , slideDurationFrames_{std::max<std::int64_t>(1, config_.fallback.slideDuration.count() * frameRate_ / 1000)}
         , morseUnits_{morseToneUnits(identText(config_))}
+        , noticeMorseUnits_{morseToneUnits("K")}
         , morseUnitSamples_{std::max<std::int64_t>(1, static_cast<std::int64_t>(defaultOutputAudioSampleRate * 1.2 / std::max(1U, config_.ident.morseWpm)))}
         , nextIdentFrame_{config_.ident.interval.count() > 0
                 ? 0
@@ -5359,13 +5360,28 @@ public:
         return audioSampleIndex_;
     }
 
-    void setNotice(std::optional<std::string> notice)
+    void setNotice(std::optional<std::string> notice, bool endTone = false)
     {
         std::lock_guard lock{outputMutex_};
         if (notice_ == notice) {
+            if (notice_.has_value()
+                && endTone
+                && !noticeMorsePlayedForNotice_
+                && !noticeMorsePending_
+                && !noticeMorseActive_
+                && !noticeMorseUnits_.empty()) {
+                noticeMorsePending_ = true;
+            }
             return;
         }
         notice_ = std::move(notice);
+        noticeMorsePlayedForNotice_ = false;
+        noticeMorsePending_ = notice_.has_value() && endTone && !noticeMorseUnits_.empty();
+        if (!notice_.has_value()) {
+            noticeMorseActive_ = false;
+            noticeMorseStartSample_ = std::numeric_limits<std::int64_t>::max();
+            noticeMorseEndSample_ = 0;
+        }
         cachedSlate_.reset();
     }
 
@@ -6163,6 +6179,43 @@ private:
         return unit < morseUnits_.size() && morseUnits_[unit];
     }
 
+    void armNoticeMorseIfPending()
+    {
+        if (!noticeMorsePending_ || noticeMorseUnits_.empty()) {
+            return;
+        }
+        noticeMorsePending_ = false;
+        noticeMorseActive_ = true;
+        noticeMorsePlayedForNotice_ = true;
+        noticeMorseStartSample_ = audioSampleIndex_;
+        noticeMorseEndSample_ = noticeMorseStartSample_
+            + static_cast<std::int64_t>(noticeMorseUnits_.size()) * morseUnitSamples_;
+    }
+
+    bool noticeMorseToneAtSample(std::int64_t sample) const
+    {
+        if (!noticeMorseActive_
+            || sample < noticeMorseStartSample_
+            || sample >= noticeMorseEndSample_
+            || noticeMorseUnits_.empty()) {
+            return false;
+        }
+        const auto unit = static_cast<std::size_t>((sample - noticeMorseStartSample_) / morseUnitSamples_);
+        return unit < noticeMorseUnits_.size() && noticeMorseUnits_[unit];
+    }
+
+    bool generatedToneAtSample(std::int64_t sample) const
+    {
+        return morseToneAtSample(sample) || noticeMorseToneAtSample(sample);
+    }
+
+    double generatedTonePhase(std::int64_t sample) const
+    {
+        const auto startSample = noticeMorseToneAtSample(sample) ? noticeMorseStartSample_ : identStartSample_;
+        return 2.0 * pi * static_cast<double>(config_.ident.morseToneHz) * static_cast<double>(sample - startSample)
+            / static_cast<double>(defaultOutputAudioSampleRate);
+    }
+
     void writeAudioUntil(std::int64_t nextVideoFrame, bool preferSubmittedAudio)
     {
 #if defined(WH_REPEATER_HAVE_GSTREAMER)
@@ -6185,15 +6238,14 @@ private:
     void writeAudioFrame(int samples, bool preferSubmittedAudio)
     {
         const auto started = std::chrono::steady_clock::now();
+        armNoticeMorseIfPending();
 #if defined(WH_REPEATER_HAVE_GSTREAMER)
         if (gstMuxer_) {
             std::vector<float> audio(static_cast<std::size_t>(samples));
             for (int index = 0; index < samples; ++index) {
                 const auto sample = audioSampleIndex_ + index;
-                if (morseToneAtSample(sample)) {
-                    const auto phase = 2.0 * pi * static_cast<double>(config_.ident.morseToneHz) * static_cast<double>(sample - identStartSample_)
-                        / static_cast<double>(defaultOutputAudioSampleRate);
-                    audio[static_cast<std::size_t>(index)] = static_cast<float>(0.22 * std::sin(phase));
+                if (generatedToneAtSample(sample)) {
+                    audio[static_cast<std::size_t>(index)] = static_cast<float>(0.22 * std::sin(generatedTonePhase(sample)));
                 } else {
                     audio[static_cast<std::size_t>(index)] = 0.0F;
                 }
@@ -6237,10 +6289,8 @@ private:
                 }
                 for (int index = 0; index < samples; ++index) {
                     const auto sample = audioSampleIndex_ + index;
-                    if (morseToneAtSample(sample)) {
-                        const auto phase = 2.0 * pi * static_cast<double>(config_.ident.morseToneHz) * static_cast<double>(sample - identStartSample_)
-                            / static_cast<double>(defaultOutputAudioSampleRate);
-                        plane[index] = static_cast<float>(0.22 * std::sin(phase));
+                    if (generatedToneAtSample(sample)) {
+                        plane[index] = static_cast<float>(0.22 * std::sin(generatedTonePhase(sample)));
                     } else {
                         plane[index] = 0.0F;
                     }
@@ -6371,11 +6421,17 @@ private:
     std::int64_t slideDurationFrames_{1};
     std::int64_t nextSlideFrame_{0};
     std::vector<bool> morseUnits_;
+    std::vector<bool> noticeMorseUnits_;
     std::int64_t morseUnitSamples_{1};
     std::int64_t nextIdentFrame_{std::numeric_limits<std::int64_t>::max()};
     std::int64_t identStartFrame_{std::numeric_limits<std::int64_t>::max()};
     std::int64_t identEndFrame_{0};
     std::int64_t identStartSample_{std::numeric_limits<std::int64_t>::max()};
+    bool noticeMorsePending_{false};
+    bool noticeMorseActive_{false};
+    bool noticeMorsePlayedForNotice_{false};
+    std::int64_t noticeMorseStartSample_{std::numeric_limits<std::int64_t>::max()};
+    std::int64_t noticeMorseEndSample_{0};
     std::int64_t audioSampleIndex_{0};
     int audioFrameSamples_{1024};
     bool firstIdent_{true};
@@ -6443,10 +6499,18 @@ void MediaPipeline::setBeaconAllowed(bool allowed)
     beaconAllowed_ = allowed;
 }
 
-void MediaPipeline::setAccessNotice(std::optional<std::string> notice)
+void MediaPipeline::setAccessNotice(std::optional<std::string> notice, bool endTone)
 {
     std::lock_guard lock{mutex_};
     accessNotice_ = std::move(notice);
+    accessNoticeEndTone_ = accessNotice_.has_value() && endTone;
+    inputReady_.notify_all();
+}
+
+void MediaPipeline::setAccessNoticeEndTone(bool endTone)
+{
+    std::lock_guard lock{mutex_};
+    accessNoticeEndTone_ = accessNotice_.has_value() && endTone;
     inputReady_.notify_all();
 }
 
@@ -6769,6 +6833,7 @@ void MediaPipeline::workerLoop()
         MediaPipelineMode mode;
         std::optional<ActiveInput> active;
         std::optional<std::string> notice;
+        bool noticeEndTone{};
         std::optional<std::string> streamIndicator;
         std::optional<std::string> fallbackVideoPath;
         std::optional<std::chrono::milliseconds> fallbackVideoSeek;
@@ -6784,6 +6849,7 @@ void MediaPipeline::workerLoop()
             mode = mode_;
             active = active_;
             notice = accessNotice_;
+            noticeEndTone = accessNoticeEndTone_;
             streamIndicator = streamIndicator_;
             fallbackVideoPath = fallbackVideoPath_;
             fallbackVideoSeek = pendingFallbackVideoSeek_;
@@ -6806,7 +6872,7 @@ void MediaPipeline::workerLoop()
                     nextFrameAt = std::chrono::steady_clock::now();
                 }
                 if (notice.has_value()) {
-                    fallbackMuxer->setNotice(notice);
+                    fallbackMuxer->setNotice(notice, noticeEndTone);
                 } else if (!beaconAllowed) {
                     fallbackMuxer->setNotice(sleepingMessage(config_));
                 } else {
@@ -7072,7 +7138,7 @@ void MediaPipeline::workerLoop()
                     }
                     if (liveVideoStale) {
                         if (notice.has_value()) {
-                            fallbackMuxer->setNotice(notice);
+                            fallbackMuxer->setNotice(notice, noticeEndTone);
                             fallbackMuxer->setStreamInfo(std::nullopt);
                         } else if (active.has_value()) {
                             fallbackMuxer->setNotice(std::nullopt);
@@ -7098,7 +7164,7 @@ void MediaPipeline::workerLoop()
                     advanceFrameClock(nextFrameAt, frameInterval);
                 } else {
                     if (notice.has_value()) {
-                        fallbackMuxer->setNotice(notice);
+                        fallbackMuxer->setNotice(notice, noticeEndTone);
                     } else if (!beaconAllowed) {
                         fallbackMuxer->setNotice(sleepingMessage(config_));
                     } else {

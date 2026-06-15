@@ -978,6 +978,7 @@ int Daemon::runPiGatewayOrLocal()
     IdentInserter ident{config_.ident};
     ApiServer api{gatewayMode ? ApiServerConfig{.bindAddress = "0.0.0.0", .port = 8080} : ApiServerConfig{}};
     std::optional<std::string> accessNotice;
+    [[maybe_unused]] bool accessNoticeEndTone{};
     std::chrono::steady_clock::time_point accessNoticeUntil{};
     std::optional<std::chrono::steady_clock::time_point> analogueLockedSince;
     std::optional<ActiveInput> heldAnalogueActive;
@@ -1138,9 +1139,11 @@ int Daemon::runPiGatewayOrLocal()
 
         if (active.has_value()) {
             accessNotice = accessMessage(config_, *active);
+            accessNoticeEndTone = false;
             accessNoticeUntil = now + hangTimeForReceiver(config_, active->receiver);
         } else if (accessNotice.has_value() && now >= accessNoticeUntil) {
             accessNotice.reset();
+            accessNoticeEndTone = false;
         }
 
         if (active.has_value()) {
@@ -1155,7 +1158,7 @@ int Daemon::runPiGatewayOrLocal()
         if (media) {
             media->select(active);
             media->setBeaconAllowed(beaconAllowed);
-            media->setAccessNotice(accessNotice);
+            media->setAccessNotice(accessNotice, accessNoticeEndTone);
             mediaForcedTransmit = media->mode() == MediaPipelineMode::fallbackVideo;
         }
 #endif
@@ -1215,6 +1218,7 @@ int Daemon::runPcGateway()
     IdentInserter ident{config_.ident};
     ApiServer api;
     std::optional<std::string> accessNotice;
+    bool accessNoticeEndTone{};
     std::optional<std::string> latestRemoteGatewayStatus;
     std::optional<ActiveInput> pcSessionInput;
     std::optional<std::string> pcSessionServiceName;
@@ -1361,6 +1365,7 @@ int Daemon::runPcGateway()
             active = gatewayInput.activeInput();
             mediaActive = mediaDisplayInput(*active, latestRemoteGatewayStatus.value_or(""));
             accessNotice = accessMessage(config_, *mediaActive);
+            accessNoticeEndTone = false;
             if (!pcWasActive) {
                 pcSessionStartedAt = now;
                 pcSessionInput.reset();
@@ -1393,6 +1398,7 @@ int Daemon::runPcGateway()
                                              now - pcSessionStartedAt,
                                              pcSessionServiceName,
                                              pcSessionVideoFormat);
+                accessNoticeEndTone = true;
                 accessNoticeUntil = now + kPcAccessNoticeHold;
                 pcWasActive = false;
             }
@@ -1400,14 +1406,16 @@ int Daemon::runPcGateway()
                 active = analogueActive;
                 mediaActive = analogueActive;
                 accessNotice = accessMessage(config_, *analogueActive);
+                accessNoticeEndTone = false;
             } else if (accessNotice.has_value() && now >= accessNoticeUntil) {
                 accessNotice.reset();
+                accessNoticeEndTone = false;
             }
         }
 
         media.select(mediaActive);
         media.setBeaconAllowed(beaconAllowed);
-        media.setAccessNotice(accessNotice);
+        media.setAccessNotice(accessNotice, accessNoticeEndTone);
         media.tick(now);
 
         api.updateStatus({gatewayInput.receiverStatus()}, active);
