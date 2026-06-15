@@ -113,6 +113,7 @@ bool beaconScheduleActive(const BeaconScheduleConfig& schedule)
     return current >= start || current < end;
 }
 
+#if !defined(WH_REPEATER_PI_GATEWAY_ONLY)
 std::string udpPortToken(std::uint16_t port)
 {
     std::ostringstream token;
@@ -148,7 +149,9 @@ bool previewReceiverRunning()
     return procNetUdpHasLocalPort("/proc/net/udp", kPreviewUdpPort)
         || procNetUdpHasLocalPort("/proc/net/udp6", kPreviewUdpPort);
 }
+#endif
 
+#if !defined(WH_REPEATER_PC_GATEWAY_ONLY)
 std::chrono::milliseconds hangTimeForReceiver(const RepeaterConfig& config, ReceiverId receiver)
 {
     for (const auto& entry : config.receivers) {
@@ -158,6 +161,7 @@ std::chrono::milliseconds hangTimeForReceiver(const RepeaterConfig& config, Rece
     }
     return std::chrono::seconds{5};
 }
+#endif
 
 std::string repeaterName(const RepeaterConfig& config)
 {
@@ -170,6 +174,7 @@ std::string repeaterName(const RepeaterConfig& config)
     return "WH Repeater";
 }
 
+#if !defined(WH_REPEATER_PI_GATEWAY_ONLY)
 std::optional<std::string_view> jsonMember(std::string_view object, std::string_view name)
 {
     const auto key = "\"" + std::string{name} + "\"";
@@ -359,6 +364,7 @@ std::optional<std::string_view> activeRemoteReceiverObject(std::string_view remo
     }
     return std::nullopt;
 }
+#endif
 
 std::string compactNoticeLine(std::string text, std::size_t maxLength = 42)
 {
@@ -396,6 +402,18 @@ std::string compactDuration(std::chrono::steady_clock::duration duration)
     return text.str();
 }
 
+bool isGenericDisplayInput(const ActiveInput& active)
+{
+    return active.receiver.value == 0
+        && active.target.frequencyKhz == 0
+        && active.target.symbolRateKs == 0
+        && active.target.label == "Received stream"
+        && !active.status.serviceName.has_value()
+        && !active.status.modulation.has_value()
+        && !active.status.merDb.has_value();
+}
+
+#if !defined(WH_REPEATER_PI_GATEWAY_ONLY)
 void applyRemoteReceiverDetails(ActiveInput& active, std::string_view remoteStatus)
 {
     if (remoteStatus.empty()) {
@@ -468,17 +486,6 @@ ActiveInput mediaDisplayInput(ActiveInput active, std::string_view remoteStatus)
     return active;
 }
 
-bool isGenericDisplayInput(const ActiveInput& active)
-{
-    return active.receiver.value == 0
-        && active.target.frequencyKhz == 0
-        && active.target.symbolRateKs == 0
-        && active.target.label == "Received stream"
-        && !active.status.serviceName.has_value()
-        && !active.status.modulation.has_value()
-        && !active.status.merDb.has_value();
-}
-
 bool hasSpecificDisplayInput(const ActiveInput& active)
 {
     return !isGenericDisplayInput(active);
@@ -523,6 +530,7 @@ std::optional<std::string> videoFormatFromStreamInfo(std::string_view text)
     auto video = lines[1].substr(separator + 3);
     return video.empty() ? std::nullopt : std::optional<std::string>{video};
 }
+#endif
 
 std::string accessMessage(const RepeaterConfig& config,
                           const ActiveInput& active,
@@ -736,6 +744,7 @@ std::optional<bool> readV4l2Sync(std::string_view device, std::string& detail, s
     return locked;
 }
 
+#if !defined(WH_REPEATER_PI_GATEWAY_ONLY)
 std::optional<ActiveInput> analogueActiveInput(const RepeaterConfig& config, const AnalogueStatus& analogue)
 {
     if (!config.analogue.capture.enabled
@@ -775,7 +784,9 @@ std::optional<ActiveInput> analogueActiveInput(const RepeaterConfig& config, con
         .status = std::move(status),
     };
 }
+#endif
 
+#if !defined(WH_REPEATER_PC_GATEWAY_ONLY)
 std::string receiverStateName(ReceiverState state)
 {
     switch (state) {
@@ -835,6 +846,7 @@ std::vector<ReceiverTransition> transitionSnapshot(const std::deque<ReceiverTran
 {
     return {transitions.begin(), transitions.end()};
 }
+#endif
 
 AnalogueStatus captureAnalogueStatus(const RepeaterConfig& config)
 {
