@@ -108,11 +108,17 @@ struct AnalogueCaptureConfig {
     std::string label{"USB analogue"};
     std::string captureDevice{"/dev/video0"};
     std::string captureStandard{"pal"};
+    std::string captureInputFormat{"yuyv422"};
     std::uint32_t captureWidth{720};
     std::uint32_t captureHeight{576};
     std::uint32_t captureFrameRate{25};
     std::uint32_t captureFrameRateNumerator{25};
     std::uint32_t captureFrameRateDenominator{1};
+    bool audioEnabled{false};
+    std::string audioDevice{"hw:1,0"};
+    std::uint32_t audioSampleRate{48'000};
+    std::uint32_t audioChannels{2};
+    std::uint32_t audioDelayMs{0};
     std::string lockMode{"v4l2-sync"};
     std::string gpioChip{"/dev/gpiochip0"};
     std::uint32_t gpioLine{26};

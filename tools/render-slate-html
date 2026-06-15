@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: render-slate-html INPUT_HTML OUTPUT_PNG [WIDTH HEIGHT]
+
+Render a local HTML slate to a fixed-size PNG using packaged headless Chromium.
+The media daemon should call this only when slate content changes, never in the
+per-frame output loop.
+EOF
+}
+
+if [[ $# -ne 2 && $# -ne 4 ]]; then
+    usage
+    exit 2
+fi
+
+input_html="$1"
+output_png="$2"
+width="${3:-1280}"
+height="${4:-720}"
+
+if [[ ! -f "$input_html" ]]; then
+    echo "render-slate-html: input not found: $input_html" >&2
+    exit 1
+fi
+
+if ! command -v chromium >/dev/null 2>&1; then
+    echo "render-slate-html: chromium is not installed" >&2
+    exit 1
+fi
+
+case "$width:$height" in
+    *[!0-9:]* | :* | *: | *::*)
+        echo "render-slate-html: width and height must be positive integers" >&2
+        exit 2
+        ;;
+esac
+
+if [[ "$width" -lt 1 || "$height" -lt 1 ]]; then
+    echo "render-slate-html: width and height must be positive integers" >&2
+    exit 2
+fi
+
+input_abs="$(realpath "$input_html")"
+output_abs="$(realpath -m "$output_png")"
+output_dir="$(dirname "$output_abs")"
+mkdir -p "$output_dir"
+
+tmp_dir="$(mktemp -d)"
+cleanup() {
+    rm -rf "$tmp_dir"
+}
+trap cleanup EXIT
+render_timeout="${SLATE_RENDER_TIMEOUT_SECONDS:-20}"
+
+chromium_args=(
+    --headless
+    --disable-gpu
+    --disable-background-networking
+    --disable-breakpad
+    --disable-crash-reporter
+    --disable-crashpad
+    --disable-default-apps
+    --disable-dev-shm-usage
+    --disable-extensions
+    --disable-sync
+    --hide-scrollbars
+    --no-first-run
+    --no-default-browser-check
+    --run-all-compositor-stages-before-draw
+    --user-data-dir="$tmp_dir/profile"
+    --virtual-time-budget=1000
+    --window-size="$width,$height"
+    --screenshot="$output_abs"
+)
+
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    chromium_args+=(--no-sandbox)
+fi
+
+timeout "$render_timeout" chromium "${chromium_args[@]}" "file://$input_abs" >/dev/null 2>&1

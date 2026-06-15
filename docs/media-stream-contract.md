@@ -122,7 +122,7 @@ Output path:
 
 Future option: editable HTML/CSS slates
 
-- Sleep, access, signal-received, and diagnostic slates may later move from
+- Sleep, access, signal-received, diagnostic, and testcard slates may later move from
   hardcoded C++ strings/layout into operator-editable local HTML/CSS templates.
 - Templates should be local files with local assets and a small set of repeater
   variables substituted by the daemon, for example callsign, receiver name,
@@ -130,14 +130,19 @@ Future option: editable HTML/CSS slates
 - The preferred architecture is render-on-change into a cached bitmap at the
   configured output size, then repeat that bitmap through the existing generated
   frame path. Slate rendering must not run in the per-frame critical path.
-- The renderer may be an external headless browser, an embedded lightweight
-  engine such as `litehtml` with a Cairo/Pango drawing backend, or another
-  equivalent HTML/CSS renderer. Embedded CEF is possible but should be treated
-  as a heavier option due to Chromium runtime, packaging, helper processes, and
-  operational complexity.
+- The selected first renderer is packaged headless Chromium, called through the
+  `render-slate-html` wrapper. It is heavier than `litehtml`, but it is
+  available on Debian 13, accurately renders normal HTML/CSS, supports fixed
+  size local-file screenshots, and can run outside the per-frame media loop.
+  `litehtml` remains a possible later embedded renderer if Chromium packaging
+  becomes too heavy. Embedded CEF should be treated as a heavier option due to
+  Chromium runtime, packaging, helper processes, and operational complexity.
 - JavaScript and remote network assets should be avoided for first
   implementation. Static HTML/CSS with local images is enough for the expected
   slate use case and is easier to make deterministic.
 - Rendering failure must not interrupt output. The media path should reuse the
   last good rendered slate, or fall back to a built-in emergency slate if no
   rendered slate is available.
+- The repository now contains starter templates under `slates/default/`.
+  Deployments install them below the service config directory so operators can
+  edit local copies without rebuilding the C++ binaries.

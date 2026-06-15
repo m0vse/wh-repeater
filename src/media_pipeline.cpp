@@ -35,6 +35,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -837,6 +838,18 @@ private:
     std::unique_ptr<AVFilterGraph, AvFilterGraphDeleter> graph_;
     AVFilterContext* source_{};
     AVFilterContext* sink_{};
+};
+
+struct AsyncRenderedFrame {
+    explicit AsyncRenderedFrame(std::string renderKey)
+        : key{std::move(renderKey)}
+    {
+    }
+
+    std::string key;
+    std::mutex mutex;
+    FramePtr frame;
+    bool ready{};
 };
 
 class VideoFilter {
@@ -1887,6 +1900,221 @@ FramePtr decodeSlideFrame(const RepeaterConfig& config, const std::filesystem::p
     std::array<int, 4> dstLinesize{output->linesize[0], output->linesize[1], output->linesize[2], 0};
     sws_scale(scaler.get(), decoded->data, decoded->linesize, 0, decoded->height, dstData.data(), dstLinesize.data());
     return output;
+}
+
+std::optional<std::string> readTextFile(const std::filesystem::path& path)
+{
+    std::ifstream input{path};
+    if (!input) {
+        return std::nullopt;
+    }
+    std::ostringstream out;
+    out << input.rdbuf();
+    return out.str();
+}
+
+std::string htmlEscape(std::string_view value)
+{
+    std::string out;
+    out.reserve(value.size());
+    for (const char ch : value) {
+        switch (ch) {
+        case '&': out += "&amp;"; break;
+        case '<': out += "&lt;"; break;
+        case '>': out += "&gt;"; break;
+        case '"': out += "&quot;"; break;
+        case '\'': out += "&#39;"; break;
+        default: out.push_back(ch); break;
+        }
+    }
+    return out;
+}
+
+void replaceAll(std::string& text, std::string_view from, std::string_view to)
+{
+    if (from.empty()) {
+        return;
+    }
+    std::size_t pos = 0;
+    while ((pos = text.find(from, pos)) != std::string::npos) {
+        text.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
+
+std::string fileUri(const std::filesystem::path& path)
+{
+    return "file://" + path.string();
+}
+
+std::optional<std::filesystem::path> findSlateTemplateDirectory()
+{
+    constexpr std::array<std::string_view, 3> candidates{{
+        "/etc/wh-pc-gateway/slates",
+        "/etc/wh-repeater/slates",
+        "slates/default",
+    }};
+    for (const auto candidate : candidates) {
+        std::error_code error;
+        const std::filesystem::path path{candidate};
+        if (std::filesystem::is_regular_file(path / "style.css", error)) {
+            return path;
+        }
+    }
+    return std::nullopt;
+}
+
+bool runSlateRenderer(const std::filesystem::path& html,
+                      const std::filesystem::path& png,
+                      int width,
+                      int height)
+{
+    const auto widthText = std::to_string(width);
+    const auto heightText = std::to_string(height);
+    const auto pid = ::fork();
+    if (pid < 0) {
+        return false;
+    }
+    if (pid == 0) {
+        execl("/usr/local/bin/render-slate-html",
+              "render-slate-html",
+              html.c_str(),
+              png.c_str(),
+              widthText.c_str(),
+              heightText.c_str(),
+              static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    int status{};
+    while (::waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return false;
+        }
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+std::string slateLine(const std::vector<std::string>& lines, std::size_t index)
+{
+    return index < lines.size() ? lines[index] : "";
+}
+
+FramePtr renderHtmlTemplateFrame(const RepeaterConfig& config,
+                                 std::string_view templateName,
+                                 const std::vector<std::pair<std::string_view, std::string>>& variables)
+{
+    const auto templateDirectory = findSlateTemplateDirectory();
+    if (!templateDirectory.has_value()) {
+        throw std::runtime_error{"no HTML slate template directory found"};
+    }
+
+    const auto templatePath = *templateDirectory / std::string{templateName};
+    auto html = readTextFile(templatePath);
+    if (!html.has_value()) {
+        throw std::runtime_error{"HTML slate template not found: " + templatePath.string()};
+    }
+    replaceAll(*html, "href=\"style.css\"", "href=\"" + fileUri(*templateDirectory / "style.css") + "\"");
+    for (const auto& [name, value] : variables) {
+        replaceAll(*html, "{{" + std::string{name} + "}}", htmlEscape(value));
+    }
+
+    static std::atomic<std::uint64_t> serial{0};
+    const auto unique = std::to_string(::getpid()) + "-" + std::to_string(serial.fetch_add(1));
+    const auto base = std::filesystem::temp_directory_path() / ("wh-slate-" + unique);
+    const auto htmlPath = base.string() + ".html";
+    const auto pngPath = base.string() + ".png";
+
+    {
+        std::ofstream output{htmlPath};
+        if (!output) {
+            throw std::runtime_error{"create temporary HTML slate failed"};
+        }
+        output << *html;
+    }
+
+    struct TempCleanup {
+        std::filesystem::path html;
+        std::filesystem::path png;
+        ~TempCleanup()
+        {
+            std::error_code error;
+            std::filesystem::remove(html, error);
+            std::filesystem::remove(png, error);
+        }
+    } cleanup{htmlPath, pngPath};
+
+    if (!runSlateRenderer(htmlPath, pngPath, outputWidth(config), outputHeight(config))) {
+        throw std::runtime_error{"HTML slate renderer failed"};
+    }
+    return decodeSlideFrame(config, pngPath);
+}
+
+FramePtr renderHtmlSlateFrame(const RepeaterConfig& config, std::string_view text, int frameRate)
+{
+    const auto lines = splitLines(text);
+    const auto title = slateLine(lines, 0).empty() ? identText(config) : slateLine(lines, 0);
+    const auto status = slateLine(lines, 1);
+    std::string templateName{"diagnostic.html"};
+    std::vector<std::pair<std::string_view, std::string>> variables{
+        {"callsign", title},
+        {"sleep_start", config.beaconSchedule.startTime},
+        {"sleep_end", config.beaconSchedule.endTime},
+        {"receiver_suffix", ""},
+        {"input_label", slateLine(lines, 2)},
+        {"frequency_khz", ""},
+        {"symbol_rate_ks", ""},
+        {"service_line", slateLine(lines, 4)},
+        {"video_format", slateLine(lines, 5)},
+        {"source_line", slateLine(lines, 2)},
+        {"rf_line", slateLine(lines, 3)},
+        {"modulation", slateLine(lines, 5)},
+        {"diagnostic_title", status},
+        {"diagnostic_line_1", slateLine(lines, 2)},
+        {"diagnostic_line_2", slateLine(lines, 3)},
+        {"diagnostic_line_3", slateLine(lines, 4)},
+    };
+
+    if (title == "Power Saving Mode") {
+        templateName = "sleep.html";
+    } else if (status.find("has just been accessed") != std::string::npos) {
+        templateName = "post-access.html";
+    } else if (status.find("Signal received") != std::string::npos) {
+        templateName = "signal-received.html";
+        if (status.size() > std::string_view{"Signal received"}.size()) {
+            for (auto& [name, value] : variables) {
+                if (name == "receiver_suffix") {
+                    value = status.substr(std::string_view{"Signal received"}.size());
+                }
+            }
+        }
+        if (lines.size() > 3) {
+            for (auto& [name, value] : variables) {
+                if (name == "rf_line") {
+                    value = slateLine(lines, 3);
+                }
+            }
+        }
+    }
+
+    try {
+        return renderHtmlTemplateFrame(config, templateName, variables);
+    } catch (const std::exception& ex) {
+        std::cerr << "wh-repeater: HTML slate render failed, using built-in slate: " << ex.what() << '\n';
+        return renderSlateFrame(config, text, frameRate);
+    }
+}
+
+FramePtr renderHtmlTestcardFrame(const RepeaterConfig& config, int frameRate)
+{
+    try {
+        return renderHtmlTemplateFrame(config,
+                                       "testcard.html",
+                                       {{"callsign", identText(config)}});
+    } catch (const std::exception& ex) {
+        std::cerr << "wh-repeater: HTML testcard render failed, using built-in testcard: " << ex.what() << '\n';
+        return renderTestcardFrame(config, frameRate);
+    }
 }
 
 std::string codecDescription(AVCodecID codecId)
@@ -4416,7 +4644,7 @@ private:
         av_dict_set(&options, "channel", "0", 0);
         av_dict_set(&options, "video_size", videoSize.c_str(), 0);
         av_dict_set(&options, "framerate", captureFrameRate.c_str(), 0);
-        av_dict_set(&options, "input_format", "yuyv422", 0);
+        av_dict_set(&options, "input_format", capture.captureInputFormat.c_str(), 0);
         av_dict_set(&options, "timeout", "2000000", 0);
 
         AVFormatContext* rawInput = avformat_alloc_context();
@@ -4459,11 +4687,32 @@ private:
             ? std::optional<std::string>{streamInfoText(*active_, "SD analogue", width, height, frameRate)}
             : std::optional<std::string>{std::string{"SD analogue\n"} + videoSize + " " + captureFrameRate + " fps"};
         output_.setStreamInfo(std::move(streamInfo));
+        output_.beginSubmittedSource("analogue", capture.audioEnabled);
 
         std::cout << "media pipeline capturing analogue from " << capture.captureDevice
-                  << " as " << capture.captureStandard << " " << videoSize << " " << captureFrameRate << " fps\n";
+                  << " as " << capture.captureStandard << " " << capture.captureInputFormat << " "
+                  << videoSize << " " << captureFrameRate << " fps\n";
         std::cout << "media pipeline analogue source decoded as " << width << "x" << height
                   << " " << (sourcePixelFormat != nullptr ? sourcePixelFormat : "unknown") << '\n';
+        std::thread audioThread;
+        if (capture.audioEnabled) {
+            audioThread = std::thread{[this] {
+                try {
+                    audioCaptureLoop();
+                } catch (const std::exception& ex) {
+                    std::cerr << "wh-repeater: analogue audio capture stopped: " << ex.what() << '\n';
+                }
+            }};
+        }
+        struct AudioThreadJoiner {
+            std::thread& thread;
+            ~AudioThreadJoiner()
+            {
+                if (thread.joinable()) {
+                    thread.join();
+                }
+            }
+        } audioJoiner{audioThread};
 
         auto packet = PacketPtr{av_packet_alloc()};
         auto frame = FramePtr{av_frame_alloc()};
@@ -4494,6 +4743,87 @@ private:
 
         checkAv(avcodec_send_packet(decoderContext.get(), nullptr), "flush analogue decoder");
         drainDecoder(decoderContext.get(), frame.get(), convertedFrame.get(), scaler, output_, captureStartedAt, lastFramePts);
+        output_.endSubmittedSource("analogue");
+    }
+
+    void audioCaptureLoop()
+    {
+        const auto& capture = config_.analogue.capture;
+        auto* audioCodec = output_.audioCodec();
+        if (audioCodec == nullptr) {
+            return;
+        }
+
+        const auto* inputFormat = av_find_input_format("alsa");
+        if (inputFormat == nullptr) {
+            throw std::runtime_error{"FFmpeg ALSA input unavailable"};
+        }
+
+        AVDictionary* options = nullptr;
+        const auto sampleRate = std::to_string(capture.audioSampleRate);
+        const auto channels = std::to_string(capture.audioChannels);
+        av_dict_set(&options, "sample_rate", sampleRate.c_str(), 0);
+        av_dict_set(&options, "channels", channels.c_str(), 0);
+
+        AVFormatContext* rawInput = avformat_alloc_context();
+        if (rawInput == nullptr) {
+            av_dict_free(&options);
+            throw std::runtime_error{"allocate analogue audio input context failed"};
+        }
+        rawInput->interrupt_callback.callback = interruptCapture;
+        rawInput->interrupt_callback.opaque = this;
+        const auto openStatus = avformat_open_input(&rawInput, capture.audioDevice.c_str(), inputFormat, &options);
+        av_dict_free(&options);
+        if (openStatus < 0) {
+            avformat_close_input(&rawInput);
+            checkAv(openStatus, "open analogue audio device " + capture.audioDevice);
+        }
+        InputFormatPtr input{rawInput};
+        checkAv(avformat_find_stream_info(input.get(), nullptr), "probe analogue audio stream");
+
+        const auto audioStreamIndex = av_find_best_stream(input.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+        checkAv(audioStreamIndex, "find analogue audio stream");
+        auto* audioStream = input->streams[audioStreamIndex];
+        const auto* decoder = avcodec_find_decoder(audioStream->codecpar->codec_id);
+        if (decoder == nullptr) {
+            throw std::runtime_error{"no decoder available for analogue audio " + codecDescription(audioStream->codecpar->codec_id)};
+        }
+
+        CodecContextPtr decoderContext{avcodec_alloc_context3(decoder)};
+        if (!decoderContext) {
+            throw std::runtime_error{"allocate analogue audio decoder failed"};
+        }
+        checkAv(avcodec_parameters_to_context(decoderContext.get(), audioStream->codecpar), "copy analogue audio parameters");
+        checkAv(avcodec_open2(decoderContext.get(), decoder, nullptr), "open analogue audio decoder");
+
+        std::cout << "media pipeline capturing analogue audio from " << capture.audioDevice
+                  << " at " << capture.audioSampleRate << " Hz " << capture.audioChannels << " channel(s)\n";
+
+        auto packet = PacketPtr{av_packet_alloc()};
+        auto frame = FramePtr{av_frame_alloc()};
+        auto convertedFrame = FramePtr{av_frame_alloc()};
+        if (!packet || !frame || !convertedFrame) {
+            throw std::runtime_error{"allocate analogue audio buffers failed"};
+        }
+        SwrContextPtr resampler;
+        AudioFifoPtr fifo;
+        bool audioDelayPrimed{};
+        while (!stopping_.load()) {
+            const auto readStatus = av_read_frame(input.get(), packet.get());
+            if (readStatus == AVERROR_EOF) {
+                break;
+            }
+            checkAv(readStatus, "read analogue audio frame");
+            if (packet->stream_index == audioStreamIndex) {
+                decodeAudioPacket(decoderContext.get(), packet.get(), frame.get(), convertedFrame.get(), resampler, fifo, audioDelayPrimed);
+            }
+            av_packet_unref(packet.get());
+        }
+
+        if (!stopping_.load()) {
+            checkAv(avcodec_send_packet(decoderContext.get(), nullptr), "flush analogue audio decoder");
+            drainAudioDecoder(decoderContext.get(), frame.get(), convertedFrame.get(), resampler, fifo, audioDelayPrimed);
+        }
     }
 
     void decodePacket(AVCodecContext* decoder,
@@ -4513,6 +4843,173 @@ private:
             checkAv(sendStatus, "send analogue packet");
         }
         drainDecoder(decoder, frame, convertedFrame, scaler, outputMuxer, captureStartedAt, lastFramePts);
+    }
+
+    void decodeAudioPacket(AVCodecContext* decoder,
+                           AVPacket* packet,
+                           AVFrame* frame,
+                           AVFrame* convertedFrame,
+                           SwrContextPtr& resampler,
+                           AudioFifoPtr& fifo,
+                           bool& audioDelayPrimed)
+    {
+        const auto sendStatus = avcodec_send_packet(decoder, packet);
+        if (sendStatus == AVERROR(EAGAIN)) {
+            drainAudioDecoder(decoder, frame, convertedFrame, resampler, fifo, audioDelayPrimed);
+            checkAv(avcodec_send_packet(decoder, packet), "send analogue audio packet after drain");
+        } else {
+            checkAv(sendStatus, "send analogue audio packet");
+        }
+        drainAudioDecoder(decoder, frame, convertedFrame, resampler, fifo, audioDelayPrimed);
+    }
+
+    void drainAudioDecoder(AVCodecContext* decoder,
+                           AVFrame* frame,
+                           AVFrame* convertedFrame,
+                           SwrContextPtr& resampler,
+                           AudioFifoPtr& fifo,
+                           bool& audioDelayPrimed)
+    {
+        for (;;) {
+            const auto receiveStatus = avcodec_receive_frame(decoder, frame);
+            if (receiveStatus == AVERROR(EAGAIN) || receiveStatus == AVERROR_EOF) {
+                break;
+            }
+            checkAv(receiveStatus, "receive analogue audio frame");
+            queueAudioFrame(frame, convertedFrame, resampler, fifo, audioDelayPrimed);
+            av_frame_unref(frame);
+        }
+    }
+
+    void queueAudioFrame(AVFrame* frame,
+                         AVFrame* convertedFrame,
+                         SwrContextPtr& resampler,
+                         AudioFifoPtr& fifo,
+                         bool& audioDelayPrimed)
+    {
+        auto* audioCodec = output_.audioCodec();
+        if (audioCodec == nullptr) {
+            return;
+        }
+        if (!resampler) {
+            AVChannelLayout inputLayout{};
+            if (frame->ch_layout.nb_channels > 0) {
+                checkAv(av_channel_layout_copy(&inputLayout, &frame->ch_layout), "copy analogue audio input layout");
+            } else {
+                av_channel_layout_default(&inputLayout, std::max(1, frame->ch_layout.nb_channels));
+            }
+
+            SwrContext* rawResampler{};
+            checkAv(swr_alloc_set_opts2(&rawResampler,
+                                        &audioCodec->ch_layout,
+                                        audioCodec->sample_fmt,
+                                        audioCodec->sample_rate,
+                                        &inputLayout,
+                                        static_cast<AVSampleFormat>(frame->format),
+                                        frame->sample_rate,
+                                        0,
+                                        nullptr),
+                    "allocate analogue audio resampler");
+            av_channel_layout_uninit(&inputLayout);
+            resampler.reset(rawResampler);
+            checkAv(swr_init(resampler.get()), "initialise analogue audio resampler");
+
+            fifo.reset(av_audio_fifo_alloc(audioCodec->sample_fmt, audioCodec->ch_layout.nb_channels, audioCodec->frame_size));
+            if (!fifo) {
+                throw std::runtime_error{"allocate analogue audio FIFO failed"};
+            }
+        }
+        if (!audioDelayPrimed) {
+            primeAnalogueAudioDelay(fifo, *audioCodec);
+            audioDelayPrimed = true;
+        }
+
+        const auto delay = swr_get_delay(resampler.get(), frame->sample_rate);
+        const auto maxOutputSamples = static_cast<int>(av_rescale_rnd(delay + frame->nb_samples,
+                                                                      audioCodec->sample_rate,
+                                                                      frame->sample_rate,
+                                                                      AV_ROUND_UP));
+        av_frame_unref(convertedFrame);
+        convertedFrame->format = audioCodec->sample_fmt;
+        convertedFrame->sample_rate = audioCodec->sample_rate;
+        convertedFrame->nb_samples = std::max(1, maxOutputSamples);
+        checkAv(av_channel_layout_copy(&convertedFrame->ch_layout, &audioCodec->ch_layout), "copy analogue converted audio layout");
+        checkAv(av_frame_get_buffer(convertedFrame, 0), "allocate analogue converted audio frame");
+
+        const auto convertedSamples = swr_convert(resampler.get(),
+                                                  convertedFrame->extended_data,
+                                                  convertedFrame->nb_samples,
+                                                  const_cast<const std::uint8_t**>(frame->extended_data),
+                                                  frame->nb_samples);
+        checkAv(convertedSamples, "resample analogue audio frame");
+        convertedFrame->nb_samples = convertedSamples;
+
+        checkAv(av_audio_fifo_realloc(fifo.get(), av_audio_fifo_size(fifo.get()) + convertedSamples), "grow analogue audio FIFO");
+        if (av_audio_fifo_write(fifo.get(), reinterpret_cast<void**>(convertedFrame->extended_data), convertedSamples) < convertedSamples) {
+            throw std::runtime_error{"write analogue audio FIFO failed"};
+        }
+        drainAudioFifo(fifo);
+    }
+
+    void primeAnalogueAudioDelay(AudioFifoPtr& fifo, const AVCodecContext& audioCodec)
+    {
+        if (!fifo || config_.analogue.capture.audioDelayMs == 0) {
+            return;
+        }
+        const auto samples = static_cast<int>(av_rescale(config_.analogue.capture.audioDelayMs,
+                                                         audioCodec.sample_rate,
+                                                         1000));
+        if (samples <= 0) {
+            return;
+        }
+        FramePtr silence{av_frame_alloc()};
+        if (!silence) {
+            throw std::runtime_error{"allocate analogue audio delay frame failed"};
+        }
+        silence->format = audioCodec.sample_fmt;
+        silence->sample_rate = audioCodec.sample_rate;
+        silence->nb_samples = samples;
+        checkAv(av_channel_layout_copy(&silence->ch_layout, &audioCodec.ch_layout), "copy analogue audio delay layout");
+        checkAv(av_frame_get_buffer(silence.get(), 0), "allocate analogue audio delay buffer");
+        checkAv(av_frame_make_writable(silence.get()), "make analogue audio delay frame writable");
+        checkAv(av_samples_set_silence(silence->extended_data,
+                                       0,
+                                       samples,
+                                       audioCodec.ch_layout.nb_channels,
+                                       audioCodec.sample_fmt),
+                "fill analogue audio delay silence");
+        checkAv(av_audio_fifo_realloc(fifo.get(), av_audio_fifo_size(fifo.get()) + samples), "grow analogue audio delay FIFO");
+        if (av_audio_fifo_write(fifo.get(), reinterpret_cast<void**>(silence->extended_data), samples) < samples) {
+            throw std::runtime_error{"write analogue audio delay FIFO failed"};
+        }
+        std::cout << "media pipeline delaying analogue audio by " << config_.analogue.capture.audioDelayMs << " ms\n";
+    }
+
+    void drainAudioFifo(AudioFifoPtr& fifo)
+    {
+        auto* audioCodec = output_.audioCodec();
+        if (audioCodec == nullptr || !fifo) {
+            return;
+        }
+        const auto frameSamples = audioCodec->frame_size > 0 ? audioCodec->frame_size : 1024;
+        while (av_audio_fifo_size(fifo.get()) >= frameSamples) {
+            if (stopping_.load()) {
+                return;
+            }
+            FramePtr frame{av_frame_alloc()};
+            if (!frame) {
+                throw std::runtime_error{"allocate analogue output audio frame failed"};
+            }
+            frame->format = audioCodec->sample_fmt;
+            frame->sample_rate = audioCodec->sample_rate;
+            frame->nb_samples = frameSamples;
+            checkAv(av_channel_layout_copy(&frame->ch_layout, &audioCodec->ch_layout), "copy analogue output audio layout");
+            checkAv(av_frame_get_buffer(frame.get(), 0), "allocate analogue output audio frame buffer");
+            if (av_audio_fifo_read(fifo.get(), reinterpret_cast<void**>(frame->extended_data), frameSamples) < frameSamples) {
+                throw std::runtime_error{"read analogue audio FIFO failed"};
+            }
+            output_.submitAudioFrame(frame.get(), "analogue");
+        }
     }
 
     void drainDecoder(AVCodecContext* decoder,
@@ -5377,6 +5874,7 @@ public:
         notice_ = std::move(notice);
         noticeMorsePlayedForNotice_ = false;
         noticeMorsePending_ = notice_.has_value() && endTone && !noticeMorseUnits_.empty();
+        pendingSlateRender_.reset();
         if (!notice_.has_value()) {
             noticeMorseActive_ = false;
             noticeMorseStartSample_ = std::numeric_limits<std::int64_t>::max();
@@ -5576,6 +6074,68 @@ public:
     }
 
 private:
+    void startSlateRenderLocked(const std::string& text)
+    {
+        auto state = std::make_shared<AsyncRenderedFrame>(text);
+        pendingSlateRender_ = state;
+        const auto config = config_;
+        const auto frameRate = frameRate_;
+        std::thread{[state, config, text, frameRate] {
+            auto frame = renderHtmlSlateFrame(config, text, frameRate);
+            std::lock_guard lock{state->mutex};
+            state->frame = std::move(frame);
+            state->ready = true;
+        }}.detach();
+    }
+
+    void pollSlateRenderLocked(const std::string& text)
+    {
+        if (!pendingSlateRender_ || pendingSlateRender_->key != text) {
+            return;
+        }
+        auto state = pendingSlateRender_;
+        {
+            std::lock_guard lock{state->mutex};
+            if (!state->ready || !state->frame) {
+                return;
+            }
+            cachedSlate_ = std::move(state->frame);
+        }
+        pendingSlateRender_.reset();
+        cachedComposited_.reset();
+    }
+
+    void startTestcardRenderLocked()
+    {
+        auto state = std::make_shared<AsyncRenderedFrame>("testcard");
+        pendingTestcardRender_ = state;
+        const auto config = config_;
+        const auto frameRate = frameRate_;
+        std::thread{[state, config, frameRate] {
+            auto frame = renderHtmlTestcardFrame(config, frameRate);
+            std::lock_guard lock{state->mutex};
+            state->frame = std::move(frame);
+            state->ready = true;
+        }}.detach();
+    }
+
+    void pollTestcardRenderLocked()
+    {
+        if (!pendingTestcardRender_) {
+            return;
+        }
+        auto state = pendingTestcardRender_;
+        {
+            std::lock_guard lock{state->mutex};
+            if (!state->ready || !state->frame) {
+                return;
+            }
+            cachedTestcard_ = std::move(state->frame);
+        }
+        pendingTestcardRender_.reset();
+        cachedComposited_.reset();
+    }
+
     void writeFrameLocked(std::int64_t frameIndex, bool preferSubmittedVideo)
     {
         FramePtr frame;
@@ -5625,6 +6185,10 @@ private:
         }
 
         if (notice_.has_value()) {
+            pollSlateRenderLocked(*notice_);
+            if (!pendingSlateRender_) {
+                startSlateRenderLocked(*notice_);
+            }
             if (!cachedSlate_) {
                 cachedSlate_ = renderSlateFrame(config_, *notice_, frameRate_);
                 cachedComposited_.reset();
@@ -5637,6 +6201,10 @@ private:
         } else {
             const auto identActive = identActiveForFrame(frameIndex);
             if (identActive) {
+                pollTestcardRenderLocked();
+                if (!pendingTestcardRender_) {
+                    startTestcardRenderLocked();
+                }
                 if (!cachedTestcard_) {
                     cachedTestcard_ = renderTestcardFrame(config_, frameRate_);
                     cachedComposited_.reset();
@@ -6413,8 +6981,10 @@ private:
     bool headerWritten_{false};
     std::optional<std::string> notice_;
     FramePtr cachedSlate_;
+    std::shared_ptr<AsyncRenderedFrame> pendingSlateRender_;
     FramePtr cachedIdent_;
     FramePtr cachedTestcard_;
+    std::shared_ptr<AsyncRenderedFrame> pendingTestcardRender_;
     FramePtr cachedSlide_;
     std::vector<std::filesystem::path> activeSlidePaths_;
     std::size_t slideIndex_{0};

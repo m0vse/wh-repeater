@@ -288,7 +288,10 @@ capture dongles. Configure `analogue.capture.captureDevice`, normally
 `v4l2-sync`, `manual`, `device-present`, and `gpio`. Use `v4l2-sync` for USB
 capture cards that expose input sync state; it only locks when the selected
 V4L2 input is not reporting no-signal or no-hsync. The Automation HAT default
-for GPIO lock is input 1 on `/dev/gpiochip0` line 26, active high.
+for GPIO lock is input 1 on `/dev/gpiochip0` line 26, active high. See
+[docs/analogue-lock-detect.md](docs/analogue-lock-detect.md) for production
+lock-detect options when analogue capture is handled by a PC without native
+GPIO.
 
 The Lintest Systems SD1 analogue experiment has been removed. It depends on
 Pi-local CSI capture, produced no completed frames during testing, and cannot

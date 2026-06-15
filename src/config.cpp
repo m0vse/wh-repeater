@@ -920,6 +920,13 @@ RepeaterConfig configFromJson(std::string_view text)
                     throw std::runtime_error{"analogue.capture.captureStandard must be pal, ntsc, or secam"};
                 }
             }
+            if (const auto* captureInputFormat = optionalMember(*capture, "captureInputFormat")) {
+                config.analogue.capture.captureInputFormat = jsonText(*captureInputFormat, "analogue.capture.captureInputFormat");
+                if (config.analogue.capture.captureInputFormat != "yuyv422"
+                    && config.analogue.capture.captureInputFormat != "mjpeg") {
+                    throw std::runtime_error{"analogue.capture.captureInputFormat must be yuyv422 or mjpeg"};
+                }
+            }
             if (const auto* captureWidth = optionalMember(*capture, "captureWidth")) {
                 config.analogue.capture.captureWidth = std::clamp(jsonUint32(*captureWidth, "analogue.capture.captureWidth"), 160U, 1920U);
             }
@@ -936,6 +943,21 @@ RepeaterConfig configFromJson(std::string_view text)
             }
             if (const auto* frameRateDenominator = optionalMember(*capture, "captureFrameRateDenominator")) {
                 config.analogue.capture.captureFrameRateDenominator = std::clamp(jsonUint32(*frameRateDenominator, "analogue.capture.captureFrameRateDenominator"), 1U, 1001U);
+            }
+            if (const auto* audioEnabled = optionalMember(*capture, "audioEnabled")) {
+                config.analogue.capture.audioEnabled = jsonBool(*audioEnabled, "analogue.capture.audioEnabled");
+            }
+            if (const auto* audioDevice = optionalMember(*capture, "audioDevice")) {
+                config.analogue.capture.audioDevice = jsonText(*audioDevice, "analogue.capture.audioDevice");
+            }
+            if (const auto* audioSampleRate = optionalMember(*capture, "audioSampleRate")) {
+                config.analogue.capture.audioSampleRate = std::clamp(jsonUint32(*audioSampleRate, "analogue.capture.audioSampleRate"), 8'000U, 192'000U);
+            }
+            if (const auto* audioChannels = optionalMember(*capture, "audioChannels")) {
+                config.analogue.capture.audioChannels = std::clamp(jsonUint32(*audioChannels, "analogue.capture.audioChannels"), 1U, 8U);
+            }
+            if (const auto* audioDelayMs = optionalMember(*capture, "audioDelayMs")) {
+                config.analogue.capture.audioDelayMs = std::clamp(jsonUint32(*audioDelayMs, "analogue.capture.audioDelayMs"), 0U, 2000U);
             }
             if (const auto* lockMode = optionalMember(*capture, "lockMode")) {
                 config.analogue.capture.lockMode = jsonText(*lockMode, "analogue.capture.lockMode");
@@ -1101,11 +1123,17 @@ std::string configToJson(const RepeaterConfig& config)
         << "      \"label\": " << jsonString(config.analogue.capture.label) << ",\n"
         << "      \"captureDevice\": " << jsonString(config.analogue.capture.captureDevice) << ",\n"
         << "      \"captureStandard\": " << jsonString(config.analogue.capture.captureStandard) << ",\n"
+        << "      \"captureInputFormat\": " << jsonString(config.analogue.capture.captureInputFormat) << ",\n"
         << "      \"captureWidth\": " << config.analogue.capture.captureWidth << ",\n"
         << "      \"captureHeight\": " << config.analogue.capture.captureHeight << ",\n"
         << "      \"captureFrameRate\": " << config.analogue.capture.captureFrameRate << ",\n"
         << "      \"captureFrameRateNumerator\": " << config.analogue.capture.captureFrameRateNumerator << ",\n"
         << "      \"captureFrameRateDenominator\": " << config.analogue.capture.captureFrameRateDenominator << ",\n"
+        << "      \"audioEnabled\": " << (config.analogue.capture.audioEnabled ? "true" : "false") << ",\n"
+        << "      \"audioDevice\": " << jsonString(config.analogue.capture.audioDevice) << ",\n"
+        << "      \"audioSampleRate\": " << config.analogue.capture.audioSampleRate << ",\n"
+        << "      \"audioChannels\": " << config.analogue.capture.audioChannels << ",\n"
+        << "      \"audioDelayMs\": " << config.analogue.capture.audioDelayMs << ",\n"
         << "      \"lockMode\": " << jsonString(config.analogue.capture.lockMode) << ",\n"
         << "      \"gpioChip\": " << jsonString(config.analogue.capture.gpioChip) << ",\n"
         << "      \"gpioLine\": " << config.analogue.capture.gpioLine << ",\n"

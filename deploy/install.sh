@@ -169,6 +169,9 @@ done
 if [[ -x "$build_dir/ts-gateway-inspect" ]]; then
     install -m 0755 "$build_dir/ts-gateway-inspect" "$install_prefix/bin/ts-gateway-inspect"
 fi
+if [[ -f "$repo_root/tools/render-slate-html" ]]; then
+    install -m 0755 "$repo_root/tools/render-slate-html" "$install_prefix/bin/render-slate-html"
+fi
 
 if [[ "$want_web" -eq 1 ]]; then
     echo "deploy: installing web UI"
@@ -180,6 +183,16 @@ fi
 
 echo "deploy: ensuring config and state directories"
 install -d -m 0755 "$config_dir" "$state_dir"
+if [[ -d "$repo_root/slates/default" ]]; then
+    echo "deploy: installing default slate templates"
+    install -d -m 0755 "$config_dir/slates"
+    for slate_file in "$repo_root"/slates/default/*; do
+        slate_name="$(basename "$slate_file")"
+        if [[ ! -f "$config_dir/slates/$slate_name" ]]; then
+            install -m 0644 "$slate_file" "$config_dir/slates/$slate_name"
+        fi
+    done
+fi
 config_file="$config_dir/config.json"
 if [[ "$deploy_target" == "legacy" ]]; then
     config_file="$config_dir/wh-repeater.json"

@@ -1,0 +1,121 @@
+:root {
+  color-scheme: dark;
+  --bg: #0057b8;
+  --panel: rgba(0, 0, 0, 0.62);
+  --accent: #f4d35e;
+  --text: #ffffff;
+  --muted: #d7e6ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 1280px;
+  height: 720px;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "DejaVu Sans", Arial, sans-serif;
+}
+
+.slate {
+  position: absolute;
+  inset: 82px 90px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 44px 70px 52px;
+  background: var(--panel);
+  border-top: 7px solid var(--accent);
+  text-align: center;
+}
+
+.slate.testcard {
+  inset: 0;
+  display: block;
+  padding: 0;
+  border: 0;
+  background: #000000;
+}
+
+.testcard-bars,
+.testcard-row {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+}
+
+.testcard-bars {
+  height: 75%;
+}
+
+.testcard-row {
+  height: 8.333333%;
+}
+
+.testcard-pluge {
+  display: grid;
+  grid-template-columns: 2fr 2fr 2fr 2fr 1fr 1fr 1fr 1fr;
+  height: 16.666667%;
+}
+
+.tc-white { background: #ebebeb; }
+.tc-yellow { background: #d2d200; }
+.tc-cyan { background: #00a9a9; }
+.tc-green { background: #009100; }
+.tc-magenta { background: #6b006b; }
+.tc-red { background: #510000; }
+.tc-blue { background: #0000c8; }
+.tc-black { background: #000000; }
+.tc-neg-i { background: #001eaf; }
+.tc-pos-q { background: #230081; }
+.tc-pluge-dark { background: #000000; }
+.tc-pluge-dim { background: #000000; }
+.tc-pluge-bright { background: #181818; }
+
+.testcard-ident {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 28px 52px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #ffffff;
+  font-size: 112px;
+  font-weight: 700;
+  line-height: 1.05;
+  white-space: nowrap;
+}
+
+.title {
+  margin: 0 0 42px;
+  font-size: 76px;
+  font-weight: 700;
+  line-height: 1.05;
+}
+
+.status {
+  margin: 0 0 34px;
+  color: var(--accent);
+  font-size: 46px;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.details {
+  display: grid;
+  gap: 14px;
+  font-size: 31px;
+  line-height: 1.22;
+}
+
+.muted {
+  color: var(--muted);
+}

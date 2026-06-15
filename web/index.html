@@ -460,6 +460,13 @@
               </select>
             </label>
             <label>
+              Input format
+              <select id="analogue-capture-input-format">
+                <option value="yuyv422">YUYV 4:2:2</option>
+                <option value="mjpeg">MJPEG</option>
+              </select>
+            </label>
+            <label>
               Capture height
               <input id="analogue-capture-height" type="number" min="120" max="1080" value="576">
             </label>
@@ -474,6 +481,26 @@
             <label>
               FPS denominator
               <input id="analogue-capture-frame-rate-denominator" type="number" min="1" max="1001" value="1">
+            </label>
+            <label class="checkbox-row">
+              <input id="analogue-audio-enabled" type="checkbox">
+              Capture audio
+            </label>
+            <label>
+              Audio device
+              <input id="analogue-audio-device" type="text" value="hw:1,0">
+            </label>
+            <label>
+              Audio sample rate
+              <input id="analogue-audio-sample-rate" type="number" min="8000" max="192000" value="48000">
+            </label>
+            <label>
+              Audio channels
+              <input id="analogue-audio-channels" type="number" min="1" max="8" value="2">
+            </label>
+            <label>
+              Audio delay ms
+              <input id="analogue-audio-delay-ms" type="number" min="0" max="2000" value="0">
             </label>
             <label>
               Lock mode

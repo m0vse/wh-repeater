@@ -133,11 +133,17 @@ std::string_view gatewayConfigJson()
           "label": "USB analogue",
           "captureDevice": "/dev/video0",
           "captureStandard": "pal",
+          "captureInputFormat": "mjpeg",
           "captureWidth": 720,
           "captureHeight": 576,
           "captureFrameRate": 25,
           "captureFrameRateNumerator": 30000,
           "captureFrameRateDenominator": 1001,
+          "audioEnabled": true,
+          "audioDevice": "hw:1,0",
+          "audioSampleRate": 48000,
+          "audioChannels": 2,
+          "audioDelayMs": 120,
           "lockMode": "v4l2-sync",
           "gpioChip": "/dev/gpiochip0",
           "gpioLine": 26,
@@ -196,6 +202,12 @@ void parsesGatewayAndAnalogueConfig()
     expect(config.gatewayInput.listenAddress == "0.0.0.0", "gateway listen address should parse");
     expect(config.gatewayInput.packetSize == 1316, "gateway packet size should parse");
     expect(!config.analogue.capture.enabled, "analogue capture should remain disabled");
+    expect(config.analogue.capture.captureInputFormat == "mjpeg", "analogue capture input format should parse");
+    expect(config.analogue.capture.audioEnabled, "analogue audio enabled should parse");
+    expect(config.analogue.capture.audioDevice == "hw:1,0", "analogue audio device should parse");
+    expect(config.analogue.capture.audioSampleRate == 48000, "analogue audio sample rate should parse");
+    expect(config.analogue.capture.audioChannels == 2, "analogue audio channels should parse");
+    expect(config.analogue.capture.audioDelayMs == 120, "analogue audio delay should parse");
     expect(config.analogue.capture.lockMode == "v4l2-sync", "analogue lock mode should parse");
     expect(config.analogue.capture.captureFrameRateNumerator == 30000, "fractional analogue frame-rate numerator should parse");
     expect(config.analogue.capture.captureFrameRateDenominator == 1001, "fractional analogue frame-rate denominator should parse");
@@ -225,6 +237,12 @@ void serialisesRoundTripFields()
     expect(roundTrip.pluto.outputAudioChannels == 2, "output audio channels should round-trip");
     expect(!roundTrip.analogue.capture.enabled, "disabled analogue state should round-trip");
     expect(roundTrip.analogue.capture.receiver.value == 5, "analogue receiver id should round-trip");
+    expect(roundTrip.analogue.capture.captureInputFormat == "mjpeg", "analogue capture input format should round-trip");
+    expect(roundTrip.analogue.capture.audioEnabled, "analogue audio enabled should round-trip");
+    expect(roundTrip.analogue.capture.audioDevice == "hw:1,0", "analogue audio device should round-trip");
+    expect(roundTrip.analogue.capture.audioSampleRate == 48000, "analogue audio sample rate should round-trip");
+    expect(roundTrip.analogue.capture.audioChannels == 2, "analogue audio channels should round-trip");
+    expect(roundTrip.analogue.capture.audioDelayMs == 120, "analogue audio delay should round-trip");
     expect(roundTrip.analogue.capture.lockMode == "v4l2-sync", "analogue lock mode should round-trip");
 }
 
@@ -278,6 +296,13 @@ void rejectsInvalidConfig()
           "receivers": []
         })json");
     }, "unsupported analogue standards should be rejected");
+
+    expectThrows([&] {
+        (void)configFromJson(R"json({
+          "analogue": {"capture": {"captureInputFormat": "rgb"}},
+          "receivers": []
+        })json");
+    }, "unsupported analogue capture formats should be rejected");
 
     expectThrows([&] {
         (void)configFromJson(R"json({

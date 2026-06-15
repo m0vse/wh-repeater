@@ -106,11 +106,17 @@ const el = {
   analogueCaptureLabel: document.querySelector("#analogue-capture-label"),
   analogueCaptureDevice: document.querySelector("#analogue-capture-device"),
   analogueCaptureStandard: document.querySelector("#analogue-capture-standard"),
+  analogueCaptureInputFormat: document.querySelector("#analogue-capture-input-format"),
   analogueCaptureWidth: document.querySelector("#analogue-capture-width"),
   analogueCaptureHeight: document.querySelector("#analogue-capture-height"),
   analogueCaptureFrameRate: document.querySelector("#analogue-capture-frame-rate"),
   analogueCaptureFrameRateNumerator: document.querySelector("#analogue-capture-frame-rate-numerator"),
   analogueCaptureFrameRateDenominator: document.querySelector("#analogue-capture-frame-rate-denominator"),
+  analogueAudioEnabled: document.querySelector("#analogue-audio-enabled"),
+  analogueAudioDevice: document.querySelector("#analogue-audio-device"),
+  analogueAudioSampleRate: document.querySelector("#analogue-audio-sample-rate"),
+  analogueAudioChannels: document.querySelector("#analogue-audio-channels"),
+  analogueAudioDelayMs: document.querySelector("#analogue-audio-delay-ms"),
   analogueCaptureLockMode: document.querySelector("#analogue-capture-lock-mode"),
   analogueCaptureGpioChip: document.querySelector("#analogue-capture-gpio-chip"),
   analogueCaptureGpioLine: document.querySelector("#analogue-capture-gpio-line"),
@@ -557,11 +563,17 @@ function fillConfigForm() {
   el.analogueCaptureLabel.value = config.analogue?.capture?.label ?? "USB analogue";
   el.analogueCaptureDevice.value = config.analogue?.capture?.captureDevice ?? "/dev/video0";
   el.analogueCaptureStandard.value = config.analogue?.capture?.captureStandard ?? "pal";
+  el.analogueCaptureInputFormat.value = config.analogue?.capture?.captureInputFormat ?? "yuyv422";
   el.analogueCaptureWidth.value = config.analogue?.capture?.captureWidth ?? 720;
   el.analogueCaptureHeight.value = config.analogue?.capture?.captureHeight ?? 576;
   el.analogueCaptureFrameRate.value = config.analogue?.capture?.captureFrameRate ?? 25;
   el.analogueCaptureFrameRateNumerator.value = config.analogue?.capture?.captureFrameRateNumerator ?? config.analogue?.capture?.captureFrameRate ?? 25;
   el.analogueCaptureFrameRateDenominator.value = config.analogue?.capture?.captureFrameRateDenominator ?? 1;
+  el.analogueAudioEnabled.checked = config.analogue?.capture?.audioEnabled ?? false;
+  el.analogueAudioDevice.value = config.analogue?.capture?.audioDevice ?? "hw:1,0";
+  el.analogueAudioSampleRate.value = config.analogue?.capture?.audioSampleRate ?? 48000;
+  el.analogueAudioChannels.value = config.analogue?.capture?.audioChannels ?? 2;
+  el.analogueAudioDelayMs.value = config.analogue?.capture?.audioDelayMs ?? 0;
   el.analogueCaptureLockMode.value = config.analogue?.capture?.lockMode ?? "v4l2-sync";
   el.analogueCaptureGpioChip.value = config.analogue?.capture?.gpioChip ?? "/dev/gpiochip0";
   el.analogueCaptureGpioLine.value = config.analogue?.capture?.gpioLine ?? 26;
@@ -754,11 +766,17 @@ function readConfigForm() {
         label: el.analogueCaptureLabel.value || "USB analogue",
         captureDevice: el.analogueCaptureDevice.value || "/dev/video0",
         captureStandard: el.analogueCaptureStandard.value || "pal",
+        captureInputFormat: el.analogueCaptureInputFormat.value || "yuyv422",
         captureWidth: numberValue(el.analogueCaptureWidth, 720),
         captureHeight: numberValue(el.analogueCaptureHeight, 576),
         captureFrameRate: numberValue(el.analogueCaptureFrameRate, 25),
         captureFrameRateNumerator: numberValue(el.analogueCaptureFrameRateNumerator, numberValue(el.analogueCaptureFrameRate, 25)),
         captureFrameRateDenominator: numberValue(el.analogueCaptureFrameRateDenominator, 1),
+        audioEnabled: el.analogueAudioEnabled.checked,
+        audioDevice: el.analogueAudioDevice.value || "hw:1,0",
+        audioSampleRate: numberValue(el.analogueAudioSampleRate, 48000),
+        audioChannels: numberValue(el.analogueAudioChannels, 2),
+        audioDelayMs: numberValue(el.analogueAudioDelayMs, 0),
         lockMode: el.analogueCaptureLockMode.value || "v4l2-sync",
         gpioChip: el.analogueCaptureGpioChip.value || "/dev/gpiochip0",
         gpioLine: numberValue(el.analogueCaptureGpioLine, 26),
@@ -1231,9 +1249,18 @@ for (const input of [
   el.analogueCaptureDeviceId,
   el.analogueCaptureLabel,
   el.analogueCaptureDevice,
+  el.analogueCaptureStandard,
+  el.analogueCaptureInputFormat,
   el.analogueCaptureWidth,
   el.analogueCaptureHeight,
   el.analogueCaptureFrameRate,
+  el.analogueCaptureFrameRateNumerator,
+  el.analogueCaptureFrameRateDenominator,
+  el.analogueAudioEnabled,
+  el.analogueAudioDevice,
+  el.analogueAudioSampleRate,
+  el.analogueAudioChannels,
+  el.analogueAudioDelayMs,
   el.analogueCaptureLockMode,
   el.analogueCaptureGpioChip,
   el.analogueCaptureGpioLine,
