@@ -32,16 +32,18 @@ struct PlutoConfig {
     std::string address{"230.10.0.1"};
     std::uint16_t port{1234};
     bool mqttEnabled{true};
-    std::string mqttHost{"192.168.2.1"};
+    std::string mqttHost{"192.168.99.118"};
     std::uint16_t mqttPort{1883};
-    std::string mqttProtocol{"pluto-ori"};
-    std::string mqttDeviceId;
+    std::string mqttProtocol{"tezuka"};
+    std::string mqttDeviceId{"nocall"};
     std::string callsign{"GB3GV"};
     std::string system{"dvbs2"};
     std::uint64_t txFrequencyHz{2400000000ULL};
     std::uint32_t symbolRateS{333000};
     int txGainDb{-40};
     int ncoHz{0};
+    int digitalGainDb{0};
+    bool firFilter{false};
     bool pilots{false};
     std::string frame{"long"};
     std::string fecMode{"fixed"};
@@ -96,6 +98,7 @@ struct IdentConfig {
 
 struct HardwarePttConfig {
     bool enabled{false};
+    std::string mode{"local"};
     std::string chip{"/dev/gpiochip0"};
     std::uint32_t line{0};
     bool activeHigh{true};

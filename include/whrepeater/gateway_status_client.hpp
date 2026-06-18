@@ -30,6 +30,8 @@ public:
     [[nodiscard]] std::optional<std::string> fetchConfig();
     [[nodiscard]] bool putConfig(const RepeaterConfig& config);
     [[nodiscard]] bool restartService();
+    [[nodiscard]] std::optional<bool> readGpio(std::string chip, std::uint32_t line, bool activeHigh);
+    [[nodiscard]] bool writeGpio(std::string chip, std::uint32_t line, bool activeHigh, bool active);
     [[nodiscard]] const std::optional<std::string>& lastError() const;
 
 private:

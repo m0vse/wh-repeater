@@ -53,6 +53,7 @@ enum class MediaMessage : std::uint32_t {
     seekFallbackVideo = 11,
     fallbackVideoStatus = 12,
     noticeEndTone = 13,
+    reconfigurePluto = 14,
 };
 
 struct MessageHeader {
@@ -387,6 +388,9 @@ void runMediaChild(RepeaterConfig config, int socket)
         case MediaMessage::preview:
             media.setPreviewEnabled(readBoolPayload(payload));
             break;
+        case MediaMessage::reconfigurePluto:
+            media.reconfigurePluto(readBoolPayload(payload));
+            break;
         case MediaMessage::streamInfo:
         case MediaMessage::fallbackVideoStatus:
             break;
@@ -491,6 +495,11 @@ void MediaProcess::setPreviewEnabled(bool enabled)
     if (sendMessage(static_cast<std::uint32_t>(MediaMessage::preview), payload, true)) {
         lastPreviewPayload_ = std::move(payload);
     }
+}
+
+void MediaProcess::reconfigurePluto(bool transmitEnabled)
+{
+    (void)sendMessage(static_cast<std::uint32_t>(MediaMessage::reconfigurePluto), boolPayload(transmitEnabled), true);
 }
 
 void MediaProcess::tick(std::chrono::steady_clock::time_point)

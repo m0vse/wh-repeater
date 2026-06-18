@@ -58,6 +58,8 @@ std::string_view gatewayConfigJson()
         "symbolRateS": 4000000,
         "txGainDb": -40,
         "ncoHz": 0,
+        "digitalGainDb": -3,
+        "firFilter": true,
         "pilots": false,
         "frame": "long",
         "fecMode": "fixed",
@@ -109,6 +111,7 @@ std::string_view gatewayConfigJson()
       },
       "hardwarePtt": {
         "enabled": false,
+        "mode": "pi-gpio",
         "chip": "/dev/gpiochip0",
         "line": 13,
         "activeHigh": true
@@ -144,7 +147,7 @@ std::string_view gatewayConfigJson()
           "audioSampleRate": 48000,
           "audioChannels": 2,
           "audioDelayMs": 120,
-          "lockMode": "v4l2-sync",
+          "lockMode": "pi-gpio",
           "gpioChip": "/dev/gpiochip0",
           "gpioLine": 26,
           "gpioActiveHigh": true
@@ -208,7 +211,8 @@ void parsesGatewayAndAnalogueConfig()
     expect(config.analogue.capture.audioSampleRate == 48000, "analogue audio sample rate should parse");
     expect(config.analogue.capture.audioChannels == 2, "analogue audio channels should parse");
     expect(config.analogue.capture.audioDelayMs == 120, "analogue audio delay should parse");
-    expect(config.analogue.capture.lockMode == "v4l2-sync", "analogue lock mode should parse");
+    expect(config.analogue.capture.lockMode == "pi-gpio", "analogue lock mode should parse");
+    expect(config.hardwarePtt.mode == "pi-gpio", "hardware PTT mode should parse");
     expect(config.analogue.capture.captureFrameRateNumerator == 30000, "fractional analogue frame-rate numerator should parse");
     expect(config.analogue.capture.captureFrameRateDenominator == 1001, "fractional analogue frame-rate denominator should parse");
 }
@@ -235,6 +239,8 @@ void serialisesRoundTripFields()
     expect(roundTrip.fallback.hardwareDecode, "fallback hardware decode should round-trip");
     expect(roundTrip.fallback.videoPaths.size() == 1, "fallback video path should round-trip");
     expect(roundTrip.pluto.outputAudioChannels == 2, "output audio channels should round-trip");
+    expect(roundTrip.pluto.digitalGainDb == -3, "Pluto digital gain should round-trip");
+    expect(roundTrip.pluto.firFilter, "Pluto FIR filter should round-trip");
     expect(!roundTrip.analogue.capture.enabled, "disabled analogue state should round-trip");
     expect(roundTrip.analogue.capture.receiver.value == 5, "analogue receiver id should round-trip");
     expect(roundTrip.analogue.capture.captureInputFormat == "mjpeg", "analogue capture input format should round-trip");
@@ -243,7 +249,8 @@ void serialisesRoundTripFields()
     expect(roundTrip.analogue.capture.audioSampleRate == 48000, "analogue audio sample rate should round-trip");
     expect(roundTrip.analogue.capture.audioChannels == 2, "analogue audio channels should round-trip");
     expect(roundTrip.analogue.capture.audioDelayMs == 120, "analogue audio delay should round-trip");
-    expect(roundTrip.analogue.capture.lockMode == "v4l2-sync", "analogue lock mode should round-trip");
+    expect(roundTrip.analogue.capture.lockMode == "pi-gpio", "analogue lock mode should round-trip");
+    expect(roundTrip.hardwarePtt.mode == "pi-gpio", "hardware PTT mode should round-trip");
 }
 
 void calculatesPlutoRates()
@@ -310,6 +317,13 @@ void rejectsInvalidConfig()
           "receivers": []
         })json");
     }, "unsupported analogue lock modes should be rejected");
+
+    expectThrows([&] {
+        (void)configFromJson(R"json({
+          "hardwarePtt": {"mode": "network"},
+          "receivers": []
+        })json");
+    }, "unsupported hardware PTT modes should be rejected");
 }
 
 } // namespace

@@ -13,12 +13,14 @@
 #include "whrepeater/gateway_status_client.hpp"
 
 #include <cerrno>
+#include <cctype>
 #include <cstring>
 #include <fcntl.h>
 #include <cstdlib>
 #include <memory>
 #include <netdb.h>
 #include <poll.h>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -45,6 +47,48 @@ bool waitFor(int fd, short events)
     item.events = events;
     const auto result = ::poll(&item, 1, ioTimeoutMs);
     return result > 0 && (item.revents & events) != 0;
+}
+
+std::string urlEncode(std::string_view value)
+{
+    std::ostringstream out;
+    out << std::uppercase << std::hex;
+    for (const auto ch : value) {
+        const auto byte = static_cast<unsigned char>(ch);
+        if ((byte >= 'A' && byte <= 'Z')
+            || (byte >= 'a' && byte <= 'z')
+            || (byte >= '0' && byte <= '9')
+            || byte == '-' || byte == '_' || byte == '.' || byte == '~') {
+            out << ch;
+        } else {
+            out << '%' << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
+        }
+    }
+    return out.str();
+}
+
+std::optional<bool> jsonBoolMember(std::string_view object, std::string_view name)
+{
+    const auto key = "\"" + std::string{name} + "\"";
+    const auto keyPos = object.find(key);
+    if (keyPos == std::string_view::npos) {
+        return std::nullopt;
+    }
+    auto pos = object.find(':', keyPos + key.size());
+    if (pos == std::string_view::npos) {
+        return std::nullopt;
+    }
+    ++pos;
+    while (pos < object.size() && std::isspace(static_cast<unsigned char>(object[pos]))) {
+        ++pos;
+    }
+    if (object.substr(pos, 4) == "true") {
+        return true;
+    }
+    if (object.substr(pos, 5) == "false") {
+        return false;
+    }
+    return std::nullopt;
 }
 
 } // namespace
@@ -114,6 +158,49 @@ bool GatewayStatusClient::restartService()
     }
     if (response->status != 200 && response->status != 202) {
         lastError_ = "Pi service restart response was HTTP " + std::to_string(response->status);
+        return false;
+    }
+    lastError_.reset();
+    return true;
+}
+
+std::optional<bool> GatewayStatusClient::readGpio(std::string chip, std::uint32_t line, bool activeHigh)
+{
+    std::ostringstream path;
+    path << "/api/gpio/read?chip=" << urlEncode(chip)
+         << "&line=" << line
+         << "&activeHigh=" << (activeHigh ? "true" : "false");
+    auto response = request("GET", path.str());
+    if (!response.has_value()) {
+        return std::nullopt;
+    }
+    if (response->status != 200) {
+        lastError_ = "Pi GPIO read response was HTTP " + std::to_string(response->status);
+        return std::nullopt;
+    }
+    if (const auto active = jsonBoolMember(response->body, "active"); active.has_value()) {
+        lastError_.reset();
+        return active;
+    }
+    lastError_ = "Pi GPIO read response missing active field";
+    return std::nullopt;
+}
+
+bool GatewayStatusClient::writeGpio(std::string chip, std::uint32_t line, bool activeHigh, bool active)
+{
+    std::ostringstream body;
+    body << "{"
+         << "\"chip\":\"" << chip << "\","
+         << "\"line\":" << line << ","
+         << "\"activeHigh\":" << (activeHigh ? "true" : "false") << ","
+         << "\"active\":" << (active ? "true" : "false")
+         << "}";
+    auto response = request("POST", "/api/gpio/write", body.str(), "application/json");
+    if (!response.has_value()) {
+        return false;
+    }
+    if (response->status != 200 && response->status != 202) {
+        lastError_ = "Pi GPIO write response was HTTP " + std::to_string(response->status);
         return false;
     }
     lastError_.reset();

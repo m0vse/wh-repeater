@@ -42,6 +42,7 @@ public:
     void writeMuxData(std::span<const std::byte> data);
     void setTransmitEnabled(bool enabled);
     void setPreviewEnabled(bool enabled);
+    void reconfigureTransmitter(bool transmitEnabled);
 
 private:
     void openSocket();
@@ -50,6 +51,7 @@ private:
     void writePreviewData(std::span<const std::byte> data);
     void flushPreviewDatagram();
     void configureTransmitter();
+    void publishTransmitState(bool enabled);
     void publishControl(std::string_view suffix, std::string_view payload);
 
     PlutoConfig config_;

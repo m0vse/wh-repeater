@@ -684,6 +684,12 @@ RepeaterConfig configFromJson(std::string_view text)
         if (const auto* ncoHz = optionalMember(*pluto, "ncoHz")) {
             config.pluto.ncoHz = jsonInt(*ncoHz, "pluto.ncoHz");
         }
+        if (const auto* digitalGainDb = optionalMember(*pluto, "digitalGainDb")) {
+            config.pluto.digitalGainDb = std::clamp(jsonInt(*digitalGainDb, "pluto.digitalGainDb"), -100, 100);
+        }
+        if (const auto* firFilter = optionalMember(*pluto, "firFilter")) {
+            config.pluto.firFilter = jsonBool(*firFilter, "pluto.firFilter");
+        }
         if (const auto* pilots = optionalMember(*pluto, "pilots")) {
             config.pluto.pilots = jsonBool(*pilots, "pluto.pilots");
         }
@@ -851,6 +857,12 @@ RepeaterConfig configFromJson(std::string_view text)
         if (const auto* enabled = optionalMember(*hardwarePtt, "enabled")) {
             config.hardwarePtt.enabled = jsonBool(*enabled, "hardwarePtt.enabled");
         }
+        if (const auto* mode = optionalMember(*hardwarePtt, "mode")) {
+            config.hardwarePtt.mode = jsonText(*mode, "hardwarePtt.mode");
+            if (config.hardwarePtt.mode != "local" && config.hardwarePtt.mode != "pi-gpio") {
+                throw std::runtime_error{"hardwarePtt.mode must be local or pi-gpio"};
+            }
+        }
         if (const auto* chip = optionalMember(*hardwarePtt, "chip")) {
             config.hardwarePtt.chip = jsonText(*chip, "hardwarePtt.chip");
         }
@@ -964,8 +976,9 @@ RepeaterConfig configFromJson(std::string_view text)
                 if (config.analogue.capture.lockMode != "manual"
                     && config.analogue.capture.lockMode != "device-present"
                     && config.analogue.capture.lockMode != "v4l2-sync"
-                    && config.analogue.capture.lockMode != "gpio") {
-                    throw std::runtime_error{"analogue.capture.lockMode must be manual, device-present, v4l2-sync, or gpio"};
+                    && config.analogue.capture.lockMode != "gpio"
+                    && config.analogue.capture.lockMode != "pi-gpio") {
+                    throw std::runtime_error{"analogue.capture.lockMode must be manual, device-present, v4l2-sync, gpio, or pi-gpio"};
                 }
             }
             if (const auto* gpioChip = optionalMember(*capture, "gpioChip")) {
@@ -1039,6 +1052,8 @@ std::string configToJson(const RepeaterConfig& config)
         << "    \"symbolRateS\": " << config.pluto.symbolRateS << ",\n"
         << "    \"txGainDb\": " << config.pluto.txGainDb << ",\n"
         << "    \"ncoHz\": " << config.pluto.ncoHz << ",\n"
+        << "    \"digitalGainDb\": " << config.pluto.digitalGainDb << ",\n"
+        << "    \"firFilter\": " << (config.pluto.firFilter ? "true" : "false") << ",\n"
         << "    \"pilots\": " << (config.pluto.pilots ? "true" : "false") << ",\n"
         << "    \"frame\": " << jsonString(config.pluto.frame) << ",\n"
         << "    \"fecMode\": " << jsonString(config.pluto.fecMode) << ",\n"
@@ -1099,6 +1114,7 @@ std::string configToJson(const RepeaterConfig& config)
         << "  },\n"
         << "  \"hardwarePtt\": {\n"
         << "    \"enabled\": " << (config.hardwarePtt.enabled ? "true" : "false") << ",\n"
+        << "    \"mode\": " << jsonString(config.hardwarePtt.mode) << ",\n"
         << "    \"chip\": " << jsonString(config.hardwarePtt.chip) << ",\n"
         << "    \"line\": " << config.hardwarePtt.line << ",\n"
         << "    \"activeHigh\": " << (config.hardwarePtt.activeHigh ? "true" : "false") << "\n"

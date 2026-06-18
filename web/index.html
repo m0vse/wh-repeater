@@ -20,7 +20,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WH Repeater</title>
-  <link rel="stylesheet" href="/styles.css?v=20260615-process-stats">
+  <link rel="stylesheet" href="/styles.css?v=20260618-pluto-purity">
 </head>
 <body>
   <header class="topbar">
@@ -184,6 +184,14 @@
               <input id="pluto-nco" type="number">
             </label>
             <label>
+              Digital gain dB
+              <input id="pluto-digital-gain" type="number" min="-100" max="100">
+            </label>
+            <label class="check">
+              <input id="pluto-fir-filter" type="checkbox">
+              DVB-S2 FIR filter
+            </label>
+            <label>
               Transmit FEC
               <select id="pluto-fec">
                 <option value="1/2">1/2</option>
@@ -230,6 +238,13 @@
             <label class="check">
               <input id="hardware-ptt-enabled" type="checkbox">
               Hardware PTT enabled
+            </label>
+            <label>
+              PTT GPIO host
+              <select id="hardware-ptt-mode">
+                <option value="local">This machine</option>
+                <option value="pi-gpio">Raspberry Pi</option>
+              </select>
             </label>
             <label>
               PTT GPIO chip
@@ -509,6 +524,7 @@
                 <option value="device-present">Device present</option>
                 <option value="v4l2-sync">V4L2 sync</option>
                 <option value="gpio">GPIO lock</option>
+                <option value="pi-gpio">Pi GPIO lock</option>
               </select>
             </label>
             <label>
@@ -604,6 +620,6 @@
     </div>
   </template>
 
-  <script src="/app.js?v=20260615-process-stats" defer></script>
+  <script src="/app.js?v=20260618-pluto-purity" defer></script>
 </body>
 </html>

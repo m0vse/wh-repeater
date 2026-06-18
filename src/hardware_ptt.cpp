@@ -48,7 +48,7 @@ void closeFd(int& fd, std::string_view label)
 HardwarePtt::HardwarePtt(HardwarePttConfig config)
     : config_{std::move(config)}
 {
-    if (config_.enabled) {
+    if (config_.enabled && config_.mode == "local") {
         try {
             openLine();
             setLine(false);
@@ -90,7 +90,7 @@ HardwarePtt& HardwarePtt::operator=(HardwarePtt&& other) noexcept
 
 void HardwarePtt::setTransmitEnabled(bool enabled)
 {
-    if (!config_.enabled || !lineOpen_ || transmitEnabled_ == enabled) {
+    if (!config_.enabled || config_.mode != "local" || !lineOpen_ || transmitEnabled_ == enabled) {
         return;
     }
 

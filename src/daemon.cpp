@@ -70,6 +70,18 @@ constexpr auto kPcAccessNoticeHold = std::chrono::seconds{10};
 constexpr auto kPcGatewayLoopInterval = std::chrono::milliseconds{10};
 constexpr std::uint16_t kPreviewUdpPort = 15000;
 
+enum class ActiveSourceFamily {
+    nimOrGateway,
+    analogue,
+};
+
+#if !defined(WH_REPEATER_PI_GATEWAY_ONLY)
+class DiscardTsSink final : public TsSink {
+public:
+    void write(std::span<const std::byte>) override {}
+};
+#endif
+
 void requestShutdown(int)
 {
     shutdownRequested.store(true);
@@ -663,6 +675,32 @@ RepeaterConfig mergePiManagedConfig(const RepeaterConfig& submitted, RepeaterCon
     piConfig.receivers = submitted.receivers;
     return piConfig;
 }
+
+void setPiHardwarePtt(GatewayStatusClient& client,
+                      const HardwarePttConfig& config,
+                      bool enabled,
+                      std::optional<bool>& lastState)
+{
+    if (!config.enabled || config.mode != "pi-gpio") {
+        lastState.reset();
+        return;
+    }
+    if (lastState.has_value() && *lastState == enabled) {
+        return;
+    }
+    if (!client.enabled()) {
+        if (!lastState.has_value()) {
+            std::cerr << "wh-repeater: Pi GPIO PTT unavailable: Pi API is disabled\n";
+        }
+        return;
+    }
+    if (client.writeGpio(config.chip, config.line, config.activeHigh, enabled)) {
+        lastState = enabled;
+    } else {
+        std::cerr << "wh-repeater: Pi GPIO PTT update failed: "
+                  << client.lastError().value_or("unknown error") << '\n';
+    }
+}
 #endif
 
 std::optional<bool> readGpioInput(std::string_view chip, std::uint32_t line, bool activeHigh, std::string& error)
@@ -848,7 +886,12 @@ std::vector<ReceiverTransition> transitionSnapshot(const std::deque<ReceiverTran
 }
 #endif
 
-AnalogueStatus captureAnalogueStatus(const RepeaterConfig& config)
+AnalogueStatus captureAnalogueStatus(
+    const RepeaterConfig& config
+#if !defined(WH_REPEATER_PI_GATEWAY_ONLY)
+    , GatewayStatusClient* piGpioClient = nullptr
+#endif
+)
 {
     AnalogueStatus status;
     status.enabled = config.analogue.capture.enabled;
@@ -882,7 +925,7 @@ AnalogueStatus captureAnalogueStatus(const RepeaterConfig& config)
             status.locked = false;
             status.error = "Analogue V4L2 sync read failed: " + syncDetail;
         }
-    } else {
+    } else if (config.analogue.capture.lockMode == "gpio") {
         std::string gpioError;
         if (const auto locked = readGpioInput(config.analogue.capture.gpioChip,
                 config.analogue.capture.gpioLine,
@@ -894,6 +937,25 @@ AnalogueStatus captureAnalogueStatus(const RepeaterConfig& config)
             status.locked = false;
             status.error = "Analogue GPIO lock read failed: " + gpioError;
         }
+#if !defined(WH_REPEATER_PI_GATEWAY_ONLY)
+    } else if (config.analogue.capture.lockMode == "pi-gpio") {
+        if (piGpioClient == nullptr || !piGpioClient->enabled()) {
+            status.locked = false;
+            status.error = "Analogue Pi GPIO lock read failed: Pi API is disabled";
+        } else if (const auto locked = piGpioClient->readGpio(config.analogue.capture.gpioChip,
+                       config.analogue.capture.gpioLine,
+                       config.analogue.capture.gpioActiveHigh)) {
+            status.locked = *locked;
+            status.rawLock = *locked ? 1 : 0;
+        } else {
+            status.locked = false;
+            status.error = "Analogue Pi GPIO lock read failed: "
+                + piGpioClient->lastError().value_or("unknown error");
+        }
+#endif
+    } else {
+        status.locked = false;
+        status.error = "Unsupported analogue lock mode: " + config.analogue.capture.lockMode;
     }
 
     if (!status.present) {
@@ -983,6 +1045,10 @@ int Daemon::runPiGatewayOrLocal()
     std::optional<std::chrono::steady_clock::time_point> analogueLockedSince;
     std::optional<ActiveInput> heldAnalogueActive;
     std::chrono::steady_clock::time_point heldAnalogueUntil{};
+    std::optional<ActiveSourceFamily> activeSourceFamily;
+#if !defined(WH_REPEATER_PI_GATEWAY_ONLY)
+    bool plutoWasConnected{};
+#endif
     std::map<int, ReceiverState> previousReceiverStates;
     std::optional<ReceiverId> previousActiveReceiver;
     std::deque<ReceiverTransition> receiverTransitions;
@@ -1017,6 +1083,7 @@ int Daemon::runPiGatewayOrLocal()
             ident = IdentInserter{config_.ident};
             analogueLockedSince.reset();
             heldAnalogueActive.reset();
+            activeSourceFamily.reset();
             api.updateConfig(config_);
             std::cout << "configuration updated via API; media and hardware worker changes apply on service restart\n";
         }
@@ -1079,26 +1146,67 @@ int Daemon::runPiGatewayOrLocal()
         api.updateAnalogueStatus(gatedAnalogueStatus);
         #if !defined(WH_REPEATER_PI_GATEWAY_ONLY)
         if (plutoStatus) {
-            api.updatePlutoStatus(plutoStatus->snapshot());
+            const auto plutoSnapshot = plutoStatus->snapshot();
+            if (media && plutoSnapshot.connected && !plutoWasConnected) {
+                std::cout << "wh-repeater: Pluto MQTT reconnected; reapplying TX configuration\n";
+                media->reconfigurePluto(beaconAllowed);
+            }
+            plutoWasConnected = plutoSnapshot.connected;
+            api.updatePlutoStatus(plutoSnapshot);
         }
         #endif
-        auto active = arbitrator.choose(statuses);
+        auto nimActive = arbitrator.choose(statuses);
+        std::optional<ActiveInput> active;
 #if !defined(WH_REPEATER_PI_GATEWAY_ONLY)
-        if (!gatewayMode && !active.has_value()) {
-            if (auto analogueActive = analogueActiveInput(config_, gatedAnalogueStatus); analogueActive.has_value()) {
-                active = analogueActive;
+        if (!gatewayMode) {
+            auto analogueActive = analogueActiveInput(config_, gatedAnalogueStatus);
+            if (activeSourceFamily == ActiveSourceFamily::nimOrGateway) {
+                if (nimActive.has_value()) {
+                    active = nimActive;
+                } else {
+                    activeSourceFamily.reset();
+                }
+            } else if (activeSourceFamily == ActiveSourceFamily::analogue) {
+                if (analogueActive.has_value()) {
+                    active = analogueActive;
+                } else if (heldAnalogueActive.has_value() && now < heldAnalogueUntil) {
+                    active = heldAnalogueActive;
+                } else {
+                    heldAnalogueActive.reset();
+                    activeSourceFamily.reset();
+                }
+            }
+
+            if (!active.has_value() && !activeSourceFamily.has_value()) {
+                if (nimActive.has_value()) {
+                    active = nimActive;
+                    activeSourceFamily = ActiveSourceFamily::nimOrGateway;
+                    heldAnalogueActive.reset();
+                } else if (analogueActive.has_value()) {
+                    active = analogueActive;
+                    activeSourceFamily = ActiveSourceFamily::analogue;
+                    heldAnalogueActive = analogueActive;
+                    heldAnalogueUntil = now + hangTimeForReceiver(config_, analogueActive->receiver);
+                }
+            } else if (activeSourceFamily == ActiveSourceFamily::analogue && analogueActive.has_value()) {
                 heldAnalogueActive = analogueActive;
                 heldAnalogueUntil = now + hangTimeForReceiver(config_, analogueActive->receiver);
-            } else if (heldAnalogueActive.has_value() && now < heldAnalogueUntil) {
-                active = heldAnalogueActive;
-            } else {
+            }
+        } else {
+            active = nimActive;
+            activeSourceFamily = active.has_value() ? std::optional<ActiveSourceFamily>{ActiveSourceFamily::nimOrGateway} : std::nullopt;
+            if (active.has_value()
+                && active->receiver != config_.analogue.capture.receiver) {
                 heldAnalogueActive.reset();
             }
-        } else if (active.has_value()
-            && active->receiver != config_.analogue.capture.receiver) {
-            heldAnalogueActive.reset();
         }
 #else
+        active = nimActive;
+#endif
+        if (!active.has_value()) {
+            activeSourceFamily.reset();
+        }
+#if !defined(WH_REPEATER_PI_GATEWAY_ONLY)
         if (active.has_value()
             && active->receiver != config_.analogue.capture.receiver) {
             heldAnalogueActive.reset();
@@ -1234,6 +1342,10 @@ int Daemon::runPcGateway()
     std::chrono::steady_clock::time_point accessNoticeUntil{};
     std::chrono::steady_clock::time_point lastGatewayStatusWarning{};
     std::optional<std::chrono::steady_clock::time_point> analogueLockedSince;
+    std::optional<ActiveSourceFamily> activeSourceFamily;
+    std::optional<bool> piPttState;
+    bool plutoWasConnected{};
+    DiscardTsSink discardTs;
     auto nextHousekeepingAt = std::chrono::steady_clock::now();
 
     api.updateConfig(config_);
@@ -1250,7 +1362,11 @@ int Daemon::runPcGateway()
             ? std::chrono::duration_cast<std::chrono::milliseconds>(nextHousekeepingAt - waitNow)
             : std::chrono::milliseconds{0};
         (void)gatewayInput.waitForData(waitTimeout);
-        gatewayInput.pump(media);
+        if (activeSourceFamily == ActiveSourceFamily::analogue) {
+            gatewayInput.pump(discardTs);
+        } else {
+            gatewayInput.pump(media);
+        }
 
         const auto loopNow = std::chrono::steady_clock::now();
         if (loopNow < nextHousekeepingAt) {
@@ -1298,6 +1414,8 @@ int Daemon::runPcGateway()
             gatewayStatus = GatewayStatusClient{config_.piStatus};
             hardwarePtt = HardwarePtt{config_.hardwarePtt};
             ident = IdentInserter{config_.ident};
+            activeSourceFamily.reset();
+            piPttState.reset();
             api.updateConfig(config_);
             std::cout << "configuration updated via API; media, gateway input, and Pluto changes apply on service restart\n";
         }
@@ -1332,9 +1450,10 @@ int Daemon::runPcGateway()
         const auto now = loopNow;
         const auto beaconAllowed = beaconScheduleActive(config_.beaconSchedule);
         api.updateBeaconSchedule(beaconAllowed);
-        api.updatePlutoStatus(plutoStatus.snapshot());
+        const auto plutoSnapshot = plutoStatus.snapshot();
+        api.updatePlutoStatus(plutoSnapshot);
         const auto analogueStatus = config_.analogue.capture.enabled
-            ? captureAnalogueStatus(config_)
+            ? captureAnalogueStatus(config_, &gatewayStatus)
             : disabledAnalogueStatus(now);
         auto gatedAnalogueStatus = analogueStatus;
         if (gatedAnalogueStatus.locked) {
@@ -1366,9 +1485,41 @@ int Daemon::runPcGateway()
         std::optional<ActiveInput> active;
         std::optional<ActiveInput> mediaActive;
         const auto latestMediaStreamInfo = media.streamInfo();
-        if (gatewayInput.active(now, config_.fallback.inputTimeout)) {
-            active = gatewayInput.activeInput();
-            mediaActive = mediaDisplayInput(*active, latestRemoteGatewayStatus.value_or(""));
+        const auto gatewayActive = gatewayInput.active(now, config_.fallback.inputTimeout)
+            ? std::optional<ActiveInput>{gatewayInput.activeInput()}
+            : std::nullopt;
+        const auto gatewayMediaActive = gatewayActive.has_value()
+            ? std::optional<ActiveInput>{mediaDisplayInput(*gatewayActive, latestRemoteGatewayStatus.value_or(""))}
+            : std::nullopt;
+        const auto analogueActive = analogueActiveInput(config_, gatedAnalogueStatus);
+        if (activeSourceFamily == ActiveSourceFamily::nimOrGateway) {
+            if (gatewayActive.has_value() && gatewayMediaActive.has_value()) {
+                active = gatewayActive;
+                mediaActive = gatewayMediaActive;
+            } else {
+                activeSourceFamily.reset();
+            }
+        } else if (activeSourceFamily == ActiveSourceFamily::analogue) {
+            if (analogueActive.has_value()) {
+                active = analogueActive;
+                mediaActive = analogueActive;
+            } else {
+                activeSourceFamily.reset();
+            }
+        }
+        if (!activeSourceFamily.has_value()) {
+            if (gatewayActive.has_value() && gatewayMediaActive.has_value()) {
+                activeSourceFamily = ActiveSourceFamily::nimOrGateway;
+                active = gatewayActive;
+                mediaActive = gatewayMediaActive;
+            } else if (analogueActive.has_value()) {
+                activeSourceFamily = ActiveSourceFamily::analogue;
+                active = analogueActive;
+                mediaActive = analogueActive;
+            }
+        }
+
+        if (activeSourceFamily == ActiveSourceFamily::nimOrGateway && mediaActive.has_value()) {
             accessNotice = accessMessage(config_, *mediaActive);
             accessNoticeEndTone = false;
             if (!pcWasActive) {
@@ -1394,7 +1545,13 @@ int Daemon::runPcGateway()
                 }
             }
             pcWasActive = true;
-        } else {
+            if (analogueWasActive && analogueSessionInput.has_value()) {
+                analogueWasActive = false;
+                analogueSessionInput.reset();
+                analogueSessionServiceName.reset();
+                analogueSessionVideoFormat.reset();
+            }
+        } else if (activeSourceFamily == ActiveSourceFamily::analogue && mediaActive.has_value()) {
             if (pcWasActive && pcSessionInput.has_value()) {
                 accessNotice = accessMessage(config_,
                                              *pcSessionInput,
@@ -1407,30 +1564,39 @@ int Daemon::runPcGateway()
                 accessNoticeUntil = now + kPcAccessNoticeHold;
                 pcWasActive = false;
             }
-            if (auto analogueActive = analogueActiveInput(config_, gatedAnalogueStatus); analogueActive.has_value()) {
-                active = analogueActive;
-                mediaActive = analogueActive;
-                accessNotice = accessMessage(config_, *analogueActive);
-                accessNoticeEndTone = false;
-                if (!analogueWasActive) {
-                    analogueSessionStartedAt = now;
-                    analogueSessionInput = analogueActive;
-                    analogueSessionServiceName.reset();
-                    analogueSessionVideoFormat.reset();
+            accessNotice = accessMessage(config_, *mediaActive);
+            accessNoticeEndTone = false;
+            if (!analogueWasActive) {
+                analogueSessionStartedAt = now;
+                analogueSessionInput = mediaActive;
+                analogueSessionServiceName.reset();
+                analogueSessionVideoFormat.reset();
+            }
+            analogueSessionInput = mediaActive;
+            if (mediaActive->status.serviceName.has_value() && !mediaActive->status.serviceName->empty()) {
+                analogueSessionServiceName = mediaActive->status.serviceName;
+            }
+            if (latestMediaStreamInfo.has_value()) {
+                if (auto service = serviceFromStreamInfo(*latestMediaStreamInfo); service.has_value()) {
+                    analogueSessionServiceName = std::move(service);
                 }
-                analogueSessionInput = analogueActive;
-                if (analogueActive->status.serviceName.has_value() && !analogueActive->status.serviceName->empty()) {
-                    analogueSessionServiceName = analogueActive->status.serviceName;
+                if (auto video = videoFormatFromStreamInfo(*latestMediaStreamInfo); video.has_value()) {
+                    analogueSessionVideoFormat = std::move(video);
                 }
-                if (latestMediaStreamInfo.has_value()) {
-                    if (auto service = serviceFromStreamInfo(*latestMediaStreamInfo); service.has_value()) {
-                        analogueSessionServiceName = std::move(service);
-                    }
-                    if (auto video = videoFormatFromStreamInfo(*latestMediaStreamInfo); video.has_value()) {
-                        analogueSessionVideoFormat = std::move(video);
-                    }
-                }
-                analogueWasActive = true;
+            }
+            analogueWasActive = true;
+        } else {
+            if (pcWasActive && pcSessionInput.has_value()) {
+                accessNotice = accessMessage(config_,
+                                             *pcSessionInput,
+                                             {},
+                                             true,
+                                             now - pcSessionStartedAt,
+                                             pcSessionServiceName,
+                                             pcSessionVideoFormat);
+                accessNoticeEndTone = true;
+                accessNoticeUntil = now + kPcAccessNoticeHold;
+                pcWasActive = false;
             } else if (analogueWasActive && analogueSessionInput.has_value()) {
                 accessNotice = accessMessage(config_,
                                              *analogueSessionInput,
@@ -1459,14 +1625,22 @@ int Daemon::runPcGateway()
         api.updateStatus({gatewayInput.receiverStatus()}, active);
 
         const auto mediaForcedTransmit = media.mode() == MediaPipelineMode::fallbackVideo;
-        hardwarePtt.setTransmitEnabled(mediaForcedTransmit
+        const auto transmitEnabled = mediaForcedTransmit
             || mediaActive.has_value()
-            || (config_.fallback.enabled && (beaconAllowed || accessNotice.has_value())));
+            || (config_.fallback.enabled && (beaconAllowed || accessNotice.has_value()));
+        if (plutoSnapshot.connected && !plutoWasConnected) {
+            std::cout << "wh-repeater: Pluto MQTT reconnected; reapplying TX configuration\n";
+            media.reconfigurePluto(transmitEnabled);
+        }
+        plutoWasConnected = plutoSnapshot.connected;
+        hardwarePtt.setTransmitEnabled(transmitEnabled);
+        setPiHardwarePtt(gatewayStatus, config_.hardwarePtt, transmitEnabled, piPttState);
 
     }
 
     std::cout << "wh-repeater PC gateway daemon shutting down\n";
     hardwarePtt.setTransmitEnabled(false);
+    setPiHardwarePtt(gatewayStatus, config_.hardwarePtt, false, piPttState);
     api.stop();
     return 0;
 }

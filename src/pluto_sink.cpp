@@ -164,6 +164,66 @@ bool sendAll(int fd, std::span<const std::byte> data)
     return true;
 }
 
+bool readByte(int fd, std::byte& byte)
+{
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(fd, &readfds);
+    timeval timeout{.tv_sec = 0, .tv_usec = mqttTimeoutMs * 1000};
+    const auto ready = ::select(fd + 1, &readfds, nullptr, nullptr, &timeout);
+    if (ready <= 0) {
+        return false;
+    }
+    unsigned char value{};
+    const auto count = ::recv(fd, &value, 1, 0);
+    if (count != 1) {
+        return false;
+    }
+    byte = static_cast<std::byte>(value);
+    return true;
+}
+
+bool readMqttPacket(int fd, std::uint8_t& type, std::vector<std::byte>& body)
+{
+    std::byte header{};
+    if (!readByte(fd, header)) {
+        return false;
+    }
+    type = static_cast<std::uint8_t>(header) >> 4;
+
+    std::size_t multiplier = 1;
+    std::size_t remaining = 0;
+    for (;;) {
+        std::byte encoded{};
+        if (!readByte(fd, encoded)) {
+            return false;
+        }
+        const auto value = static_cast<std::uint8_t>(encoded);
+        remaining += (value & 127) * multiplier;
+        if ((value & 128) == 0) {
+            break;
+        }
+        multiplier *= 128;
+        if (multiplier > 128 * 128 * 128) {
+            return false;
+        }
+    }
+
+    body.assign(remaining, std::byte{0});
+    auto offset = std::size_t{0};
+    while (offset < body.size()) {
+        const auto count = ::recv(fd, body.data() + offset, body.size() - offset, 0);
+        if (count <= 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        offset += static_cast<std::size_t>(count);
+    }
+    return true;
+}
+
 bool publishMqtt(const PlutoConfig& config, std::string_view topic, std::string_view payload)
 {
     const auto fd = connectTcp(config.mqttHost, config.mqttPort);
@@ -175,8 +235,8 @@ bool publishMqtt(const PlutoConfig& config, std::string_view topic, std::string_
     appendString(variable, "MQTT");
     variable.push_back(std::byte{4});
     variable.push_back(std::byte{2});
-    appendUint16(variable, 10);
-    appendString(variable, "wh-repeater");
+    appendUint16(variable, 20);
+    appendString(variable, "wh-repeater-control");
 
     std::vector<std::byte> connect;
     connect.push_back(std::byte{0x10});
@@ -195,7 +255,14 @@ bool publishMqtt(const PlutoConfig& config, std::string_view topic, std::string_
     publish.insert(publish.end(), publishVariable.begin(), publishVariable.end());
 
     const std::array<std::byte, 2> disconnect{std::byte{0xe0}, std::byte{0x00}};
-    const auto ok = sendAll(fd, connect) && sendAll(fd, publish) && sendAll(fd, disconnect);
+    std::uint8_t type{};
+    std::vector<std::byte> body;
+    const auto connected = sendAll(fd, connect)
+        && readMqttPacket(fd, type, body)
+        && type == 2
+        && body.size() >= 2
+        && body[1] == std::byte{0};
+    const auto ok = connected && sendAll(fd, publish) && sendAll(fd, disconnect);
     if (!ok) {
         std::cerr << "wh-repeater: Pluto MQTT publish failed for " << topic << '\n';
     }
@@ -264,8 +331,12 @@ void PlutoSink::writeMuxData(std::span<const std::byte> data)
         return;
     }
     configureTransmitter();
-    openSocket();
     writePreviewData(data);
+    if (!transmitEnabled_) {
+        datagram_.clear();
+        return;
+    }
+    openSocket();
     for (const auto byte : data) {
         datagram_.push_back(byte);
         if (datagram_.size() == datagramSize) {
@@ -382,8 +453,26 @@ void PlutoSink::setTransmitEnabled(bool enabled)
         return;
     }
     configureTransmitter();
-    publishControl("tx/mute", enabled ? "0" : "1");
+    if (!enabled) {
+        datagram_.clear();
+        closeSocket(socket_);
+        socket_ = -1;
+    }
+    publishTransmitState(enabled);
     transmitEnabled_ = enabled;
+}
+
+void PlutoSink::reconfigureTransmitter(bool transmitEnabled)
+{
+    configured_ = false;
+    configureTransmitter();
+    if (!transmitEnabled) {
+        datagram_.clear();
+        closeSocket(socket_);
+        socket_ = -1;
+    }
+    publishTransmitState(transmitEnabled);
+    transmitEnabled_ = transmitEnabled;
 }
 
 void PlutoSink::configureTransmitter()
@@ -421,8 +510,21 @@ void PlutoSink::configureTransmitter()
         publishControl("tx/dvbs2/fecmode", config_.fecMode);
         publishControl("tx/dvbs2/gainvariable", "-100");
         publishControl("tx/dvbs2/agcgain", "-100");
+        publishControl("tx/dvbs2/digitalgain", std::to_string(config_.digitalGainDb));
+        publishControl("tx/dvbs2/firfilter", config_.firFilter ? "1" : "0");
     }
     configured_ = true;
+}
+
+void PlutoSink::publishTransmitState(bool enabled)
+{
+    if (enabled) {
+        publishControl("tx/stream/run", "1");
+        publishControl("tx/mute", "0");
+    } else {
+        publishControl("tx/mute", "1");
+        publishControl("tx/stream/run", "0");
+    }
 }
 
 void PlutoSink::publishControl(std::string_view suffix, std::string_view payload)
@@ -432,7 +534,9 @@ void PlutoSink::publishControl(std::string_view suffix, std::string_view payload
         return;
     }
     const auto topic = "cmd/pluto/" + deviceId + "/" + std::string{suffix};
-    (void)publishMqtt(config_, topic, payload);
+    if (!publishMqtt(config_, topic, payload)) {
+        (void)publishMqtt(config_, topic, payload);
+    }
 }
 
 } // namespace whrepeater

@@ -28,15 +28,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <linux/gpio.h>
 #include <netinet/in.h>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -994,6 +997,119 @@ std::optional<std::string> queryParameter(std::string_view path, std::string_vie
     return std::nullopt;
 }
 
+std::optional<bool> queryBool(std::string_view path, std::string_view name)
+{
+    const auto value = queryParameter(path, name);
+    if (!value.has_value()) {
+        return std::nullopt;
+    }
+    if (*value == "true" || *value == "1" || *value == "yes") {
+        return true;
+    }
+    if (*value == "false" || *value == "0" || *value == "no") {
+        return false;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::uint32_t> queryUint32(std::string_view path, std::string_view name)
+{
+    const auto value = queryParameter(path, name);
+    if (!value.has_value() || value->empty()) {
+        return std::nullopt;
+    }
+    char* end{};
+    const auto parsed = std::strtoul(value->c_str(), &end, 10);
+    if (end == value->c_str() || *end != '\0' || parsed > std::numeric_limits<std::uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(parsed);
+}
+
+std::optional<bool> jsonBoolValue(std::string_view value)
+{
+    value = trimJson(value);
+    if (value == "true") {
+        return true;
+    }
+    if (value == "false") {
+        return false;
+    }
+    return std::nullopt;
+}
+
+std::optional<bool> gpioReadLine(std::string_view chip, std::uint32_t line, bool activeHigh, std::string& error)
+{
+    const int chipFd = ::open(std::string{chip}.c_str(), O_RDONLY | O_CLOEXEC);
+    if (chipFd < 0) {
+        error = "open " + std::string{chip} + ": " + std::strerror(errno);
+        return std::nullopt;
+    }
+
+    gpio_v2_line_request request{};
+    request.offsets[0] = line;
+    request.num_lines = 1;
+    std::snprintf(request.consumer, sizeof(request.consumer), "wh-repeater-api-gpio-read");
+    request.config.flags = GPIO_V2_LINE_FLAG_INPUT;
+    if (::ioctl(chipFd, GPIO_V2_GET_LINE_IOCTL, &request) < 0) {
+        error = "request GPIO input line " + std::to_string(line) + ": " + std::strerror(errno);
+        closeFd(chipFd);
+        return std::nullopt;
+    }
+
+    gpio_v2_line_values values{};
+    values.mask = 1;
+    if (::ioctl(request.fd, GPIO_V2_LINE_GET_VALUES_IOCTL, &values) < 0) {
+        error = "read GPIO line " + std::to_string(line) + ": " + std::strerror(errno);
+        closeFd(request.fd);
+        closeFd(chipFd);
+        return std::nullopt;
+    }
+
+    const bool physicalHigh = (values.bits & 1U) != 0;
+    closeFd(request.fd);
+    closeFd(chipFd);
+    return activeHigh ? physicalHigh : !physicalHigh;
+}
+
+bool gpioWriteLine(std::string_view chip, std::uint32_t line, bool activeHigh, bool active, std::string& error)
+{
+    const int chipFd = ::open(std::string{chip}.c_str(), O_RDONLY | O_CLOEXEC);
+    if (chipFd < 0) {
+        error = "open " + std::string{chip} + ": " + std::strerror(errno);
+        return false;
+    }
+
+    const bool physicalHigh = activeHigh ? active : !active;
+    gpio_v2_line_request request{};
+    request.offsets[0] = line;
+    request.num_lines = 1;
+    std::snprintf(request.consumer, sizeof(request.consumer), "wh-repeater-api-gpio-write");
+    request.config.flags = GPIO_V2_LINE_FLAG_OUTPUT;
+    request.config.num_attrs = 1;
+    request.config.attrs[0].attr.id = GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES;
+    request.config.attrs[0].attr.values = physicalHigh ? 1 : 0;
+    request.config.attrs[0].mask = 1;
+    if (::ioctl(chipFd, GPIO_V2_GET_LINE_IOCTL, &request) < 0) {
+        error = "request GPIO output line " + std::to_string(line) + ": " + std::strerror(errno);
+        closeFd(chipFd);
+        return false;
+    }
+
+    gpio_v2_line_values values{};
+    values.mask = 1;
+    values.bits = physicalHigh ? 1 : 0;
+    if (::ioctl(request.fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &values) < 0) {
+        error = "set GPIO line " + std::to_string(line) + ": " + std::strerror(errno);
+        closeFd(request.fd);
+        closeFd(chipFd);
+        return false;
+    }
+    closeFd(request.fd);
+    closeFd(chipFd);
+    return true;
+}
+
 } // namespace
 
 ApiServer::ApiServer(ApiServerConfig config)
@@ -1243,6 +1359,67 @@ void ApiServer::handleClient(int clientFd)
     if (method == "GET" && path == "/api/config") {
         const auto body = configJson();
         writeResponse(clientFd, "200 OK", "application/json", body);
+        return;
+    }
+
+    if (method == "GET" && path.rfind("/api/gpio/read", 0) == 0) {
+        const auto chip = queryParameter(path, "chip").value_or("/dev/gpiochip0");
+        const auto line = queryUint32(path, "line");
+        const auto activeHigh = queryBool(path, "activeHigh").value_or(true);
+        if (!line.has_value()) {
+            writeResponse(clientFd, "400 Bad Request", "application/json", "{\"error\":\"missing or invalid GPIO line\"}\n");
+            return;
+        }
+        std::string error;
+        const auto active = gpioReadLine(chip, *line, activeHigh, error);
+        if (!active.has_value()) {
+            writeResponse(clientFd, "500 Internal Server Error", "application/json", "{\"error\":" + jsonString(error) + "}\n");
+            return;
+        }
+        std::ostringstream body;
+        body << "{"
+             << "\"chip\":" << jsonString(chip) << ","
+             << "\"line\":" << *line << ","
+             << "\"activeHigh\":" << (activeHigh ? "true" : "false") << ","
+             << "\"active\":" << (*active ? "true" : "false")
+             << "}\n";
+        writeResponse(clientFd, "200 OK", "application/json", body.str());
+        return;
+    }
+
+    if (method == "POST" && path == "/api/gpio/write") {
+        const auto bodyStart = request.find("\r\n\r\n");
+        if (bodyStart == std::string_view::npos) {
+            writeResponse(clientFd, "400 Bad Request", "application/json", "{\"error\":\"missing request body\"}\n");
+            return;
+        }
+        const auto body = request.substr(bodyStart + 4);
+        const auto chipValue = jsonMember(body, "chip");
+        const auto lineValue = jsonMember(body, "line");
+        const auto activeHighValue = jsonMember(body, "activeHigh");
+        const auto activeValue = jsonMember(body, "active");
+        const auto line = lineValue.has_value() ? jsonIntValue(*lineValue) : std::nullopt;
+        const auto active = activeValue.has_value() ? jsonBoolValue(*activeValue) : std::nullopt;
+        const auto activeHigh = activeHighValue.has_value() ? jsonBoolValue(*activeHighValue).value_or(true) : true;
+        if (!line.has_value() || *line < 0 || !active.has_value()) {
+            writeResponse(clientFd, "400 Bad Request", "application/json", "{\"error\":\"missing or invalid GPIO write fields\"}\n");
+            return;
+        }
+        const auto chip = chipValue.has_value() ? unquotedJsonString(*chipValue) : std::string{"/dev/gpiochip0"};
+        std::string error;
+        if (!gpioWriteLine(chip, static_cast<std::uint32_t>(*line), activeHigh, *active, error)) {
+            writeResponse(clientFd, "500 Internal Server Error", "application/json", "{\"error\":" + jsonString(error) + "}\n");
+            return;
+        }
+        std::ostringstream response;
+        response << "{"
+                 << "\"accepted\":true,"
+                 << "\"chip\":" << jsonString(chip) << ","
+                 << "\"line\":" << *line << ","
+                 << "\"activeHigh\":" << (activeHigh ? "true" : "false") << ","
+                 << "\"active\":" << (*active ? "true" : "false")
+                 << "}\n";
+        writeResponse(clientFd, "202 Accepted", "application/json", response.str());
         return;
     }
 

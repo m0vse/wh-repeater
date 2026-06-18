@@ -192,6 +192,20 @@ main {
   color: #126329;
 }
 
+.badge-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.badge.tx {
+  background: #d93025;
+  color: #ffffff;
+  font-weight: 700;
+}
+
 .status-card dl {
   display: grid;
   gap: 7px 12px;

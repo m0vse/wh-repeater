@@ -37,6 +37,8 @@ namespace {
 
 constexpr auto connectTimeoutMs{500};
 constexpr auto reconnectDelay{std::chrono::seconds{3}};
+constexpr auto mqttKeepalive{std::chrono::seconds{20}};
+constexpr auto mqttPingInterval{std::chrono::seconds{10}};
 
 void closeFd(int fd)
 {
@@ -159,7 +161,7 @@ std::vector<std::byte> mqttConnectPacket()
     appendString(variable, "MQTT");
     variable.push_back(std::byte{4});
     variable.push_back(std::byte{2});
-    appendUint16(variable, 20);
+    appendUint16(variable, static_cast<std::uint16_t>(mqttKeepalive.count()));
     appendString(variable, "wh-repeater-status");
 
     std::vector<std::byte> packet;
@@ -183,7 +185,16 @@ std::vector<std::byte> mqttSubscribePacket(std::string_view topic)
     return packet;
 }
 
-bool readByte(int fd, std::byte& byte, std::atomic_bool& stopping)
+bool sendMqttPing(int fd)
+{
+    const std::array packet{std::byte{0xc0}, std::byte{0x00}};
+    return sendAll(fd, packet);
+}
+
+bool readByte(int fd,
+              std::byte& byte,
+              std::atomic_bool& stopping,
+              std::optional<std::chrono::steady_clock::time_point>& nextPing)
 {
     while (!stopping.load()) {
         fd_set readfds;
@@ -198,6 +209,12 @@ bool readByte(int fd, std::byte& byte, std::atomic_bool& stopping)
             return false;
         }
         if (ready == 0) {
+            if (nextPing.has_value() && std::chrono::steady_clock::now() >= *nextPing) {
+                if (!sendMqttPing(fd)) {
+                    return false;
+                }
+                *nextPing = std::chrono::steady_clock::now() + mqttPingInterval;
+            }
             continue;
         }
         unsigned char value{};
@@ -211,10 +228,14 @@ bool readByte(int fd, std::byte& byte, std::atomic_bool& stopping)
     return false;
 }
 
-bool readPacket(int fd, std::uint8_t& type, std::vector<std::byte>& body, std::atomic_bool& stopping)
+bool readPacket(int fd,
+                std::uint8_t& type,
+                std::vector<std::byte>& body,
+                std::atomic_bool& stopping,
+                std::optional<std::chrono::steady_clock::time_point>& nextPing)
 {
     std::byte header{};
-    if (!readByte(fd, header, stopping)) {
+    if (!readByte(fd, header, stopping, nextPing)) {
         return false;
     }
     type = static_cast<std::uint8_t>(header) >> 4;
@@ -223,7 +244,7 @@ bool readPacket(int fd, std::uint8_t& type, std::vector<std::byte>& body, std::a
     std::size_t remaining = 0;
     for (;;) {
         std::byte encoded{};
-        if (!readByte(fd, encoded, stopping)) {
+        if (!readByte(fd, encoded, stopping, nextPing)) {
             return false;
         }
         const auto value = static_cast<std::uint8_t>(encoded);
@@ -319,7 +340,8 @@ void PlutoMqttStatusWorker::workerLoop()
 
         std::uint8_t type{};
         std::vector<std::byte> body;
-        if (!readPacket(fd, type, body, stopping_) || type != 2 || body.size() < 2 || body[1] != std::byte{0}) {
+        std::optional<std::chrono::steady_clock::time_point> nextPing;
+        if (!readPacket(fd, type, body, stopping_, nextPing) || type != 2 || body.size() < 2 || body[1] != std::byte{0}) {
             closeFd(fd);
             setDisconnected("MQTT CONNACK failed");
             std::this_thread::sleep_for(reconnectDelay);
@@ -332,17 +354,21 @@ void PlutoMqttStatusWorker::workerLoop()
             std::this_thread::sleep_for(reconnectDelay);
             continue;
         }
-        if (!readPacket(fd, type, body, stopping_) || type != 9) {
+        if (!readPacket(fd, type, body, stopping_, nextPing) || type != 9) {
             closeFd(fd);
             setDisconnected("MQTT SUBACK failed");
             std::this_thread::sleep_for(reconnectDelay);
             continue;
         }
 
+        nextPing = std::chrono::steady_clock::now() + mqttPingInterval;
         setConnected(true);
         while (!stopping_.load()) {
-            if (!readPacket(fd, type, body, stopping_)) {
+            if (!readPacket(fd, type, body, stopping_, nextPing)) {
                 break;
+            }
+            if (type == 13) {
+                continue;
             }
             if (type != 3 || body.size() < 2) {
                 continue;

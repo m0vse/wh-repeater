@@ -45,6 +45,7 @@ public:
     void stopFallbackVideo();
     void seekFallbackVideo(std::chrono::milliseconds position);
     void setPreviewEnabled(bool enabled);
+    void reconfigurePluto(bool transmitEnabled);
     void tick(std::chrono::steady_clock::time_point now);
     void write(std::span<const std::byte> packet) override;
 

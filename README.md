@@ -312,11 +312,20 @@ baseline scan.
 
 Tezuka/F5OEO DATV output is selected with `"mqttProtocol": "tezuka"` in the
 `pluto` config object, plus optional `"mqttDeviceId"` when the firmware's MQTT
-device id is not the same as the configured callsign. The daemon sends MPEG-TS
-over UDP to `pluto.address` and `pluto.port`, configures the Tezuka TS source
-with `tx/dvbs2/tssourcemode=0` and `tx/dvbs2/tssourceaddress=<address>:<port>`,
-and uses the serial-scoped `cmd/pluto/<device-id>/...` and
-`dt/pluto/<device-id>/...` topic layout.
+device id is not the same as the configured callsign. For the GB3GV layout the
+Pluto Tezuka control path is the Pluto `eth0` address, currently
+`192.168.99.118`, and this firmware currently uses MQTT device id `nocall`;
+`usb0`/`192.168.2.1` is not the preferred control path. The daemon sends
+MPEG-TS over UDP to `pluto.address` and `pluto.port`, configures the Tezuka TS
+source with `tx/dvbs2/tssourcemode=0` and
+`tx/dvbs2/tssourceaddress=<address>:<port>`, and uses the serial-scoped
+`cmd/pluto/<device-id>/...` and `dt/pluto/<device-id>/...` topic layout.
+
+The Pluto output settings include `pluto.firFilter` and
+`pluto.digitalGainDb` for spectrum-purity tuning. Keep the defaults
+(`false`/`0`) unless measuring the RF output; a practical tuning order is to
+enable the FIR filter, then reduce digital gain, then reduce RF `txGainDb` if
+the Pluto or following amplifier chain is being overdriven.
 
 ## Source Layout
 

@@ -2155,6 +2155,79 @@ double sourceFrameRate(const AVStream& stream)
     return std::clamp(av_q2d(rate), 1.0, 120.0);
 }
 
+class DecodedFrameRateEstimator {
+public:
+    void record(std::chrono::steady_clock::time_point now)
+    {
+        samples_.push_back(now);
+        while (samples_.size() > kMaxSamples) {
+            samples_.pop_front();
+        }
+        while (samples_.size() >= 2 && now - samples_.front() > kWindow) {
+            samples_.pop_front();
+        }
+    }
+
+    [[nodiscard]] std::optional<int> frameRate() const
+    {
+        if (samples_.size() < kMinSamples) {
+            return std::nullopt;
+        }
+        const auto elapsed = samples_.back() - samples_.front();
+        if (elapsed < kMinWindow) {
+            return std::nullopt;
+        }
+        const auto seconds = std::chrono::duration<double>{elapsed}.count();
+        if (seconds <= 0.0) {
+            return std::nullopt;
+        }
+        const auto frames = static_cast<double>(samples_.size() - 1);
+        return std::clamp(static_cast<int>(std::llround(frames / seconds)), 1, 50);
+    }
+
+    void recordSourceTimestamp(std::int64_t timestamp, AVRational timeBase)
+    {
+        if (timestamp == AV_NOPTS_VALUE || timeBase.num <= 0 || timeBase.den <= 0) {
+            return;
+        }
+        const auto seconds = static_cast<double>(timestamp) * av_q2d(timeBase);
+        if (!sourceSamples_.empty() && seconds <= sourceSamples_.back()) {
+            return;
+        }
+        sourceSamples_.push_back(seconds);
+        while (sourceSamples_.size() > kMaxSamples) {
+            sourceSamples_.pop_front();
+        }
+        while (sourceSamples_.size() >= 2 && sourceSamples_.back() - sourceSamples_.front() > sourceWindowSeconds) {
+            sourceSamples_.pop_front();
+        }
+    }
+
+    [[nodiscard]] std::optional<int> sourceFrameRate() const
+    {
+        if (sourceSamples_.size() < kMinSamples) {
+            return std::nullopt;
+        }
+        const auto elapsed = sourceSamples_.back() - sourceSamples_.front();
+        if (elapsed < sourceMinWindowSeconds) {
+            return std::nullopt;
+        }
+        const auto frames = static_cast<double>(sourceSamples_.size() - 1);
+        return std::clamp(static_cast<int>(std::llround(frames / elapsed)), 1, 50);
+    }
+
+private:
+    static constexpr auto kWindow = std::chrono::seconds{3};
+    static constexpr auto kMinWindow = std::chrono::milliseconds{700};
+    static constexpr std::size_t kMinSamples = 12;
+    static constexpr std::size_t kMaxSamples = 180;
+    static constexpr double sourceWindowSeconds = 3.0;
+    static constexpr double sourceMinWindowSeconds = 0.7;
+
+    std::deque<std::chrono::steady_clock::time_point> samples_;
+    std::deque<double> sourceSamples_;
+};
+
 bool interlacedFieldOrder(AVFieldOrder order)
 {
     return order == AV_FIELD_TT
@@ -3303,6 +3376,7 @@ private:
             throw std::runtime_error{"allocate live decoder failed"};
         }
         checkAv(avcodec_parameters_to_context(context.get(), stream->codecpar), "copy live decoder parameters");
+        context->pkt_timebase = stream->time_base;
         checkAv(avcodec_open2(context.get(), decoder, nullptr), "open live video decoder");
 
         const auto decodedWidth = evenDimension(stream->codecpar->width > 0 ? stream->codecpar->width : outputWidth(config_));
@@ -3317,6 +3391,7 @@ private:
             .width = decodedWidth,
             .height = decodedHeight,
             .frameRate = frameRate,
+            .measuredFrameRate = false,
         };
         refreshStreamInfo(*inputFormat, *stream);
         convertedFrame->format = output_.pixelFormat();
@@ -3332,7 +3407,7 @@ private:
     void refreshStreamInfo(const AVFormatContext& inputFormat, const AVStream& stream)
     {
         std::optional<std::string> streamInfo;
-        if (active_.has_value() && liveVideoDetails_.has_value()) {
+        if (active_.has_value() && liveVideoDetails_.has_value() && liveVideoDetails_->measuredFrameRate) {
             streamInfo = streamInfoText(*active_,
                                         liveVideoDetails_->codec,
                                         liveVideoDetails_->width,
@@ -3667,7 +3742,18 @@ private:
                 continue;
             }
             checkAv(receiveStatus, "receive decoded live frame");
+            const auto decodedAt = std::chrono::steady_clock::now();
             lastVideoFrameSteadyMs_.store(steadyClockMs());
+            frameRateEstimator_.record(decodedAt);
+            frameRateEstimator_.recordSourceTimestamp(frame->best_effort_timestamp, decoder->pkt_timebase);
+            if (auto measuredFrameRate = frameRateEstimator_.sourceFrameRate();
+                measuredFrameRate.has_value() && liveVideoDetails_.has_value()
+                && liveVideoDetails_->frameRate != *measuredFrameRate) {
+                liveVideoDetails_->frameRate = *measuredFrameRate;
+                liveVideoDetails_->measuredFrameRate = true;
+            } else if (measuredFrameRate.has_value() && liveVideoDetails_.has_value()) {
+                liveVideoDetails_->measuredFrameRate = true;
+            }
             ready_.store(true);
             if (stopping_.load()) {
                 av_frame_unref(frame);
@@ -3755,8 +3841,10 @@ private:
         int width{};
         int height{};
         int frameRate{};
+        bool measuredFrameRate{false};
     };
     std::optional<LiveVideoDetails> liveVideoDetails_;
+    DecodedFrameRateEstimator frameRateEstimator_;
     std::vector<int> loggedLiveStreams_;
     std::thread thread_;
 };
@@ -7136,6 +7224,13 @@ void MediaPipeline::setPreviewEnabled(bool enabled)
     output_.setPreviewEnabled(enabled);
 }
 
+void MediaPipeline::reconfigurePluto(bool transmitEnabled)
+{
+    std::lock_guard lock{mutex_};
+    transmitEnabled_ = transmitEnabled;
+    output_.reconfigureTransmitter(transmitEnabled_);
+}
+
 void MediaPipeline::tick(std::chrono::steady_clock::time_point now)
 {
     std::lock_guard lock{mutex_};
@@ -7605,7 +7700,13 @@ void MediaPipeline::workerLoop()
                     std::cerr << "wh-repeater: analogue capture ended; returning to generated fallback stream\n";
                 } else {
                     const auto frameInterval = outputFrameInterval(outputFrameRate(config_));
-                    fallbackMuxer->setNotice(std::nullopt);
+                    if (notice.has_value()) {
+                        fallbackMuxer->setNotice(notice, noticeEndTone);
+                    } else if (!beaconAllowed) {
+                        fallbackMuxer->setNotice(sleepingMessage(config_));
+                    } else {
+                        fallbackMuxer->setNotice(std::nullopt);
+                    }
                     std::this_thread::sleep_until(nextFrameAt);
                     fallbackFrameIndex = std::max(fallbackFrameIndex, fallbackMuxer->nextVideoPts());
                     fallbackMuxer->writeFrame(fallbackFrameIndex++, true);

@@ -53,6 +53,8 @@ const el = {
   plutoSymbolRate: document.querySelector("#pluto-symbol-rate"),
   plutoGain: document.querySelector("#pluto-gain"),
   plutoNco: document.querySelector("#pluto-nco"),
+  plutoDigitalGain: document.querySelector("#pluto-digital-gain"),
+  plutoFirFilter: document.querySelector("#pluto-fir-filter"),
   plutoPilots: document.querySelector("#pluto-pilots"),
   plutoFrame: document.querySelector("#pluto-frame"),
   plutoFecMode: document.querySelector("#pluto-fec-mode"),
@@ -78,6 +80,7 @@ const el = {
   h264Level: document.querySelector("#h264-level"),
   plutoFec: document.querySelector("#pluto-fec"),
   hardwarePttEnabled: document.querySelector("#hardware-ptt-enabled"),
+  hardwarePttMode: document.querySelector("#hardware-ptt-mode"),
   hardwarePttChip: document.querySelector("#hardware-ptt-chip"),
   hardwarePttLine: document.querySelector("#hardware-ptt-line"),
   hardwarePttActiveHigh: document.querySelector("#hardware-ptt-active-high"),
@@ -248,8 +251,10 @@ function renderStatus() {
     const card = document.createElement("article");
     card.className = `status-card ${receiver.id === activeReceiver ? "active" : ""}`;
     const target = receiver.target;
-    const title = receiver.name || `RX${receiver.id}`;
     const isAnalogue = receiver.type === "analogue";
+    const title = isAnalogue
+      ? (receiver.serviceName || receiver.name || "Analogue")
+      : (target?.label || receiver.serviceName || receiver.name || `RX${receiver.id}`);
     const targetText = target ? `${target.frequencyKhz} kHz / ${target.symbolRateKs} kS` : "-";
     if (isAnalogue) {
       card.innerHTML = `
@@ -329,6 +334,21 @@ function txValue(values, key) {
   return values?.[key] ?? null;
 }
 
+function isPlutoTransmitting(pluto) {
+  if (!pluto?.connected) {
+    return false;
+  }
+  const values = pluto.values || {};
+  const mute = values["tx/mute"];
+  if (mute !== undefined && mute !== null && String(mute) !== "0") {
+    return false;
+  }
+  if (String(values["tx/stream/run"] ?? "") === "1") {
+    return true;
+  }
+  return Boolean(values["tx/stream/mode"] || values["tx/dvbs2/sr"]);
+}
+
 function fecFraction(fec) {
   const [numerator, denominator] = String(fec || "1/2").split("/").map(Number);
   if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || numerator <= 0 || denominator <= 0) {
@@ -382,22 +402,32 @@ function renderTxStatus() {
   const pluto = state.status?.pluto;
   const gateway = state.status?.tsGateway;
   const gatewayMode = state.status?.mode === "ts-gateway" || state.config?.mode === "ts-gateway";
+  const values = pluto?.values || {};
+  const plutoTxActive = !gatewayMode && isPlutoTransmitting(pluto);
   el.txStatusPanel.innerHTML = "";
 
   const head = document.createElement("div");
   head.className = "panel-head";
   const title = document.createElement("h2");
   title.textContent = gatewayMode ? "TS Gateway Status" : "TX Status";
+  const badges = document.createElement("div");
+  badges.className = "badge-row";
   const badge = document.createElement("span");
   badge.className = `badge ${(gatewayMode ? gateway?.enabled : pluto?.connected) ? "locked" : ""}`;
   badge.textContent = gatewayMode
     ? (gateway?.enabled ? "enabled" : "disabled")
     : (pluto?.connected ? "connected" : "disconnected");
+  badges.appendChild(badge);
+  if (plutoTxActive) {
+    const txBadge = document.createElement("span");
+    txBadge.className = "badge tx";
+    txBadge.textContent = "TX";
+    badges.appendChild(txBadge);
+  }
   head.appendChild(title);
-  head.appendChild(badge);
+  head.appendChild(badges);
   el.txStatusPanel.appendChild(head);
 
-  const values = pluto?.values || {};
   const list = document.createElement("dl");
   list.className = "tx-status-grid";
   if (gatewayMode) {
@@ -422,6 +452,8 @@ function renderTxStatus() {
   appendStatusRow(list, "Stream mode", txValue(values, "tx/stream/mode"));
   appendStatusRow(list, "Symbol rate", txValue(values, "tx/dvbs2/sr"));
   appendStatusRow(list, "FEC", txValue(values, "tx/dvbs2/fec") || txValue(values, "tx/dvbs2/ts/fecvariable"));
+  appendStatusRow(list, "Digital gain", txValue(values, "tx/dvbs2/digitalgain"));
+  appendStatusRow(list, "FIR filter", txValue(values, "tx/dvbs2/firfilter"));
   appendStatusRow(list, "TS bitrate", txValue(values, "tx/dvbs2/ts/bitrate"));
   appendStatusRow(list, "Queue", txValue(values, "tx/dvbs2/queue"));
   appendStatusRow(list, "Version", txValue(values, "system/version"));
@@ -505,9 +537,9 @@ function fillConfigForm() {
   el.plutoAddress.value = config.pluto?.address ?? "230.10.0.1";
   el.plutoPort.value = config.pluto?.port ?? 1234;
   el.plutoMqttEnabled.checked = config.pluto?.mqttEnabled ?? true;
-  el.plutoMqttHost.value = config.pluto?.mqttHost ?? "192.168.2.1";
+  el.plutoMqttHost.value = config.pluto?.mqttHost ?? "192.168.99.118";
   el.plutoMqttPort.value = config.pluto?.mqttPort ?? 1883;
-  el.plutoMqttProtocol.value = config.pluto?.mqttProtocol ?? "pluto-ori";
+  el.plutoMqttProtocol.value = config.pluto?.mqttProtocol ?? "tezuka";
   el.plutoMqttDeviceId.value = config.pluto?.mqttDeviceId ?? "";
   el.plutoCallsign.value = config.pluto?.callsign ?? "GB3GV";
   el.plutoSystem.value = config.pluto?.system ?? "dvbs2";
@@ -515,6 +547,8 @@ function fillConfigForm() {
   el.plutoSymbolRate.value = config.pluto?.symbolRateS ?? 333000;
   el.plutoGain.value = config.pluto?.txGainDb ?? -40;
   el.plutoNco.value = config.pluto?.ncoHz ?? 0;
+  el.plutoDigitalGain.value = config.pluto?.digitalGainDb ?? 0;
+  el.plutoFirFilter.checked = Boolean(config.pluto?.firFilter);
   el.plutoPilots.checked = Boolean(config.pluto?.pilots);
   el.plutoFrame.value = config.pluto?.frame ?? "long";
   el.plutoFecMode.value = config.pluto?.fecMode ?? "fixed";
@@ -540,6 +574,7 @@ function fillConfigForm() {
   el.h264Level.value = config.pluto?.h264Level ?? "auto";
   el.plutoFec.value = config.pluto?.fec ?? "1/2";
   el.hardwarePttEnabled.checked = Boolean(config.hardwarePtt?.enabled);
+  el.hardwarePttMode.value = config.hardwarePtt?.mode ?? "local";
   el.hardwarePttChip.value = config.hardwarePtt?.chip ?? "/dev/gpiochip0";
   el.hardwarePttLine.value = config.hardwarePtt?.line ?? 0;
   el.hardwarePttActiveHigh.checked = config.hardwarePtt?.activeHigh ?? true;
@@ -686,7 +721,7 @@ function readConfigForm() {
       address: el.plutoAddress.value,
       port: numberValue(el.plutoPort, 1234),
       mqttEnabled: el.plutoMqttEnabled.checked,
-      mqttHost: el.plutoMqttHost.value || "192.168.2.1",
+      mqttHost: el.plutoMqttHost.value || "192.168.99.118",
       mqttPort: numberValue(el.plutoMqttPort, 1883),
       mqttProtocol: el.plutoMqttProtocol.value,
       mqttDeviceId: el.plutoMqttDeviceId.value.trim(),
@@ -696,6 +731,8 @@ function readConfigForm() {
       symbolRateS: numberValue(el.plutoSymbolRate, 333000),
       txGainDb: numberValue(el.plutoGain, -40),
       ncoHz: numberValue(el.plutoNco, 0),
+      digitalGainDb: Math.max(-100, Math.min(100, numberValue(el.plutoDigitalGain, 0))),
+      firFilter: el.plutoFirFilter.checked,
       pilots: el.plutoPilots.checked,
       frame: el.plutoFrame.value,
       fecMode: el.plutoFecMode.value,
@@ -749,6 +786,7 @@ function readConfigForm() {
     },
     hardwarePtt: {
       enabled: el.hardwarePttEnabled.checked,
+      mode: el.hardwarePttMode.value || "local",
       chip: el.hardwarePttChip.value || "/dev/gpiochip0",
       line: numberValue(el.hardwarePttLine, 0),
       activeHigh: el.hardwarePttActiveHigh.checked,
@@ -1205,6 +1243,8 @@ for (const input of [
   el.plutoSymbolRate,
   el.plutoGain,
   el.plutoNco,
+  el.plutoDigitalGain,
+  el.plutoFirFilter,
   el.plutoPilots,
   el.plutoFrame,
   el.plutoFecMode,
@@ -1228,6 +1268,7 @@ for (const input of [
   el.h264Level,
   el.plutoFec,
   el.hardwarePttEnabled,
+  el.hardwarePttMode,
   el.hardwarePttChip,
   el.hardwarePttLine,
   el.hardwarePttActiveHigh,
